@@ -69,7 +69,7 @@ When iterating locally, the parent folder also runs `infillx-ai` and `intelligen
 
 ## Deploying
 
-- **Vercel**: import the repo (once it has one), framework preset = Next.js, no env vars required. The site is fully static.
+- **Vercel**: import `github.com/abhishekmthw/portfolio`, framework preset = Next.js, no env vars required. The site is fully static.
 - **Metadata**: page `<title>` and OG tags come from [data/profile.ts](data/profile.ts) via [app/layout.tsx](app/layout.tsx).
 
 ## Things to be careful about
