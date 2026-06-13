@@ -35,6 +35,17 @@
     --brand: 217 91% 60%;
     --brand-foreground: 0 0% 100%;
 
+    /* secondary brand (cyan/teal) for gradients + glow */
+    --brand-2: 190 90% 42%;
+
+    /* syntax-highlight accents — tuned for the light bg (0 0% 100%) */
+    --syntax-comment: 150 14% 46%;
+    --syntax-keyword: 291 64% 50%;
+    --syntax-fn: 217 91% 52%;
+    --syntax-string: 142 60% 36%;
+    --syntax-number: 28 90% 48%;
+    --syntax-var: 190 80% 38%;
+
     --radius: 0.75rem;
   }
 
@@ -69,6 +80,17 @@
 
     --brand: 217 91% 60%;
     --brand-foreground: 0 0% 100%;
+
+    /* secondary brand (cyan/teal) for gradients + glow */
+    --brand-2: 190 95% 55%;
+
+    /* syntax-highlight accents — tuned for the dark bg (222 47% 5%) */
+    --syntax-comment: 150 12% 58%;
+    --syntax-keyword: 291 80% 72%;
+    --syntax-fn: 217 91% 66%;
+    --syntax-string: 142 64% 62%;
+    --syntax-number: 32 95% 64%;
+    --syntax-var: 190 92% 66%;
   }
 }
 
@@ -78,6 +100,14 @@
   }
   html {
     scroll-behavior: smooth;
+    /* Native document scrollbar hidden so page content (incl. the hero canvas)
+       spans the full viewport width. A custom overlay <Scrollbar/> floats a
+       themed thumb on top, so the hero animation shows through behind it. */
+    scrollbar-width: none;
+  }
+  html::-webkit-scrollbar {
+    width: 0;
+    height: 0;
   }
   body {
     @apply bg-background text-foreground antialiased;
@@ -96,14 +126,230 @@
     mask-image: radial-gradient(ellipse at center, black 30%, transparent 75%);
     -webkit-mask-image: radial-gradient(ellipse at center, black 30%, transparent 75%);
   }
+  /* Fade the hero 3D scene out toward the bottom so the wireframe model
+     dissolves into the page instead of hard-cutting at the section edge while
+     scrolling. */
+  .hero-scene-fade {
+    mask-image: linear-gradient(to bottom, #000 72%, transparent 100%);
+    -webkit-mask-image: linear-gradient(to bottom, #000 72%, transparent 100%);
+  }
   .text-gradient {
     background: linear-gradient(
       135deg,
-      hsl(var(--foreground)) 0%,
-      hsl(var(--brand)) 100%
+      hsl(var(--brand)) 0%,
+      hsl(var(--brand-2)) 100%
     );
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
+  }
+
+  /* Reusable translucent card surface */
+  .glass {
+    background-color: hsl(var(--card) / 0.4);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid hsl(var(--border) / 0.6);
+  }
+
+  /* Soft brand-colored glow */
+  .glow-brand {
+    box-shadow:
+      0 0 0 1px hsl(var(--brand) / 0.15),
+      0 8px 40px -8px hsl(var(--brand) / 0.45),
+      0 0 60px -20px hsl(var(--brand-2) / 0.4);
+  }
+
+  /* Animated multi-stop ambient background gradient (brand + brand2, low opacity) */
+  .bg-aurora {
+    background-image:
+      radial-gradient(
+        40% 50% at 15% 20%,
+        hsl(var(--brand) / 0.18) 0%,
+        transparent 70%
+      ),
+      radial-gradient(
+        45% 55% at 85% 25%,
+        hsl(var(--brand-2) / 0.16) 0%,
+        transparent 70%
+      ),
+      radial-gradient(
+        50% 60% at 50% 95%,
+        hsl(var(--brand) / 0.12) 0%,
+        transparent 70%
+      );
+    background-size: 200% 200%;
+    background-repeat: no-repeat;
+    animation: aurora 18s ease-in-out infinite;
+  }
+
+  /* Existing grid, but slowly panning */
+  .bg-grid-pan {
+    background-image:
+      linear-gradient(to right, hsl(var(--border) / 0.4) 1px, transparent 1px),
+      linear-gradient(to bottom, hsl(var(--border) / 0.4) 1px, transparent 1px);
+    background-size: 56px 56px;
+    animation: grid-pan 8s linear infinite;
+  }
+
+  /* Inline blinking cursor block */
+  .caret {
+    display: inline-block;
+    width: 0.6ch;
+    height: 1.05em;
+    margin-left: 0.1ch;
+    transform: translateY(0.12em);
+    background-color: hsl(var(--brand));
+    animation: blink 1s steps(1) infinite;
+  }
+
+  /* Very subtle scanline overlay (tasteful, optional) */
+  .scanline {
+    position: relative;
+  }
+  .scanline::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image: repeating-linear-gradient(
+      to bottom,
+      hsl(var(--foreground) / 0.025) 0px,
+      hsl(var(--foreground) / 0.025) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+  }
+}
+
+/* ---- HoverCard hover-effect helpers ---- */
+/* Beam travels by perimeter distance (not angle) so its speed is uniform on
+   every side regardless of the card's aspect ratio. A conic-gradient sweeps at
+   constant angular velocity about the center, which maps to uneven arc-length
+   on rectangles (slow on long sides, fast on short ones). offset-distance
+   advances at constant arc-length speed along the path, so it stays linear. */
+@keyframes beam-travel {
+  to {
+    offset-distance: 100%;
+  }
+}
+@keyframes fx-glitch {
+  0% {
+    transform: translate(0, 0);
+  }
+  20% {
+    transform: translate(-2px, 1px);
+    box-shadow:
+      2px 0 0 hsl(var(--brand) / 0.5),
+      -2px 0 0 hsl(var(--brand-2) / 0.5);
+  }
+  40% {
+    transform: translate(2px, -1px);
+  }
+  60% {
+    transform: translate(-1px, -1px);
+    box-shadow:
+      -2px 0 0 hsl(var(--brand) / 0.5),
+      2px 0 0 hsl(var(--brand-2) / 0.5);
+  }
+  80% {
+    transform: translate(1px, 1px);
+  }
+  100% {
+    transform: translate(0, 0);
+  }
+}
+@keyframes fx-scan {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 0 8px;
+  }
+}
+
+@layer utilities {
+  /* A defined beam confined to the border by the xor ring mask, so its long
+     sides stay crisp and nothing bleeds perpendicular into the card. The radial
+     gradient is brightest at the center and fades toward the two ends; a small
+     blur feathers those tips. Because the mask clips the perpendicular spill but
+     not the along-the-border direction, the glow only bleeds out of the beam's
+     two ends. Paused until hover so off-screen cards don't composite a blur
+     every frame. */
+  .fx-beam-ring {
+    padding: 2px;
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+  }
+  .fx-beam-ring::before {
+    content: "";
+    position: absolute;
+    /* Kept small enough that the glow radius stays under the height of the
+       shortest cards — otherwise, on a short card, a comet on the top edge would
+       also light up the bottom edge, reading as two beams. */
+    width: 200px;
+    aspect-ratio: 1;
+    /* rounded-rect path matching the card's rounded-xl (0.75rem) border */
+    offset-path: inset(0 round 0.75rem);
+    offset-distance: 0%;
+    /* Translate only — auto-rotate would whip a long beam 90deg around the 12px
+       corners. A concentric gradient looks the same at any orientation. */
+    offset-rotate: 0deg;
+    /* small blur feathers the two ends; the mask clips the perpendicular spill
+       so the beam itself stays a thin, defined line */
+    filter: blur(7px);
+    background: radial-gradient(
+      circle,
+      hsl(0 0% 100%) 0%,
+      hsl(var(--brand-2)) 24%,
+      hsl(var(--brand)) 46%,
+      transparent 70%
+    );
+    animation: beam-travel 9s linear infinite;
+    animation-play-state: paused;
+  }
+  .group:hover .fx-beam-ring::before {
+    animation-play-state: running;
+  }
+  /* moving CRT scanlines (HoverCard "scanline") */
+  .fx-scanlines {
+    background-image: repeating-linear-gradient(
+      to bottom,
+      hsl(var(--foreground) / 0.07) 0px,
+      hsl(var(--foreground) / 0.07) 1px,
+      transparent 1px,
+      transparent 4px
+    );
+    animation: fx-scan 0.5s linear infinite;
+  }
+}
+
+/* Respect reduced-motion: neutralize the time-based animated utilities */
+@media (prefers-reduced-motion: reduce) {
+  .bg-aurora,
+  .bg-grid-pan,
+  .caret,
+  .fx-beam-ring,
+  .fx-beam-ring::before,
+  .fx-scanlines,
+  .animate-blink,
+  .animate-float,
+  .animate-aurora,
+  .animate-grid-pan,
+  .animate-gradient-x,
+  .animate-glow-pulse,
+  .animate-shimmer,
+  .animate-draw,
+  .animate-ping,
+  .animate-pulse,
+  .animate-spin,
+  .animate-bounce {
+    animation: none !important;
+  }
+  html {
+    scroll-behavior: auto;
   }
 }

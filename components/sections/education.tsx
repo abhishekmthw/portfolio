@@ -1,68 +1,117 @@
+"use client";
+
 import { GraduationCap, Award } from "lucide-react";
 
-import { Card, CardContent } from "@/components/ui/card";
 import { SectionHeading } from "@/components/section-heading";
+import { Reveal } from "@/components/motion/reveal";
+import { HoverCard } from "@/components/motion/hover-card";
+import { cn } from "@/lib/utils";
 import { education, accomplishments } from "@/data/education";
 
 export function Education() {
   return (
     <section id="education" className="container scroll-mt-20 py-24">
       <SectionHeading
-        eyebrow="Education"
+        eyebrow="education"
         title="Background."
         description="Formal education and certifications."
       />
 
       <div className="grid gap-6 lg:grid-cols-2">
+        {/* Degrees */}
         <div className="flex flex-col gap-4">
+          <Reveal delay={0.02}>
+            <p className="mb-1 font-mono text-xs text-syntax-comment">
+              {"// degrees"}
+            </p>
+          </Reveal>
+
           {education.map((e, i) => (
-            <Card key={i} className="bg-card/40 backdrop-blur">
-              <CardContent className="flex gap-4 p-6">
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-brand/15 text-brand">
-                  <GraduationCap className="h-5 w-5" />
+            <Reveal key={i} delay={0.06 + i * 0.08} y={20}>
+              <HoverCard className="group h-full p-6">
+                <div className="flex gap-4">
+                  <div
+                    aria-hidden
+                    className={cn(
+                      "flex h-10 w-10 shrink-0 items-center justify-center rounded-lg",
+                      "bg-brand/15 text-brand ring-1 ring-brand/20",
+                      "transition-all duration-300 group-hover:bg-brand/25 group-hover:shadow-[0_0_24px_-4px_hsl(var(--brand)/0.55)]",
+                    )}
+                  >
+                    <GraduationCap className="h-5 w-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <h3 className="text-base font-semibold tracking-tight text-foreground">
+                      {e.qualification}
+                    </h3>
+                    <p className="mt-0.5 text-sm text-muted-foreground">
+                      {e.institution}
+                      <span className="text-muted-foreground/60"> · </span>
+                      {e.location}
+                    </p>
+                    <p className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-xs">
+                      <span className="text-syntax-fn">{e.period}</span>
+                      {e.detail ? (
+                        <>
+                          <span className="text-muted-foreground/50">|</span>
+                          <span className="text-syntax-number">
+                            {e.detail}
+                          </span>
+                        </>
+                      ) : null}
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="text-base font-semibold tracking-tight">
-                    {e.qualification}
-                  </h3>
-                  <p className="text-sm text-muted-foreground">
-                    {e.institution} · {e.location}
-                  </p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {e.period}
-                    {e.detail ? ` · ${e.detail}` : ""}
-                  </p>
-                </div>
-              </CardContent>
-            </Card>
+              </HoverCard>
+            </Reveal>
           ))}
         </div>
 
+        {/* Certifications */}
         <div className="flex flex-col gap-4">
+          <Reveal delay={0.04}>
+            <p className="mb-1 font-mono text-xs text-syntax-comment">
+              {"// certifications"}
+            </p>
+          </Reveal>
+
           {accomplishments.map((a, i) => (
-            <Card key={i} className="bg-card/40 backdrop-blur">
-              <CardContent className="p-6">
-                <div className="mb-3 flex items-center gap-3">
-                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-brand/15 text-brand">
+            <Reveal key={i} delay={0.08 + i * 0.08} y={20}>
+              <HoverCard className="group h-full p-6">
+                <div className="mb-4 flex items-center gap-3">
+                  <div
+                    aria-hidden
+                    className={cn(
+                      "flex h-10 w-10 shrink-0 items-center justify-center rounded-lg",
+                      "bg-brand/15 text-brand ring-1 ring-brand/20",
+                      "transition-all duration-300 group-hover:bg-brand/25 group-hover:shadow-[0_0_24px_-4px_hsl(var(--brand)/0.55)]",
+                    )}
+                  >
                     <Award className="h-5 w-5" />
                   </div>
-                  <div>
-                    <h3 className="text-base font-semibold tracking-tight">
+                  <div className="min-w-0">
+                    <h3 className="text-base font-semibold tracking-tight text-foreground">
                       {a.title}
                     </h3>
-                    <p className="text-sm text-muted-foreground">{a.issuer}</p>
+                    <p className="mt-0.5 font-mono text-xs text-syntax-fn">
+                      {a.issuer}
+                    </p>
                   </div>
                 </div>
-                <ul className="grid gap-1 text-sm text-muted-foreground sm:grid-cols-2">
+
+                <ul className="grid gap-x-4 gap-y-1.5 text-sm text-muted-foreground sm:grid-cols-2">
                   {a.details.map((d, j) => (
-                    <li key={j} className="flex gap-2">
-                      <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-brand" />
+                    <li key={j} className="flex items-start gap-2">
+                      <span
+                        aria-hidden
+                        className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-brand/80 ring-1 ring-brand/30"
+                      />
                       <span>{d}</span>
                     </li>
                   ))}
                 </ul>
-              </CardContent>
-            </Card>
+              </HoverCard>
+            </Reveal>
           ))}
         </div>
       </div>

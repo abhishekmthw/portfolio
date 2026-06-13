@@ -1,4 +1,7 @@
+"use client";
+
 import { cn } from "@/lib/utils";
+import { Reveal } from "@/components/motion/reveal";
 
 type Props = {
   eyebrow?: string;
@@ -24,22 +27,29 @@ export function SectionHeading({
       )}
     >
       {eyebrow && (
-        <span className="text-xs font-semibold uppercase tracking-[0.18em] text-brand">
-          {eyebrow}
-        </span>
+        <Reveal y={8}>
+          <span className="font-mono text-xs tracking-tight text-syntax-comment">
+            <span className="text-syntax-keyword">{"// "}</span>
+            {eyebrow}
+          </span>
+        </Reveal>
       )}
-      <h2 className="text-3xl font-semibold tracking-tight sm:text-4xl">
-        {title}
-      </h2>
+      <Reveal y={12} delay={0.05}>
+        <h2 className="text-3xl font-semibold tracking-tight sm:text-4xl">
+          {title}
+        </h2>
+      </Reveal>
       {description && (
-        <p
-          className={cn(
-            "max-w-2xl text-base text-muted-foreground sm:text-lg",
-            align === "center" && "mx-auto"
-          )}
-        >
-          {description}
-        </p>
+        <Reveal y={12} delay={0.1}>
+          <p
+            className={cn(
+              "max-w-2xl text-base text-muted-foreground sm:text-lg",
+              align === "center" && "mx-auto"
+            )}
+          >
+            {description}
+          </p>
+        </Reveal>
       )}
     </div>
   );
