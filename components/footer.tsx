@@ -2,8 +2,7 @@ import Link from "next/link";
 import { Github, Linkedin, Mail } from "lucide-react";
 
 import { profile } from "@/data/profile";
-import { Magnetic } from "@/components/motion/magnetic";
-import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
 
 const socials = [
   {
@@ -27,10 +26,9 @@ const socials = [
 ] as const;
 
 /**
- * Quiet, monospace "built with" footer with magnetic social icon links.
- * Stays a server component — the only interactivity (magnetic pull) is
- * delegated to the client <Magnetic> primitive, which also degrades to a
- * passthrough under reduced-motion / touch.
+ * Quiet, monospace "built with" footer. Social icon links reuse the same
+ * outline Button as the navbar theme toggle, so they share its border +
+ * brand-glow hover. No client interactivity — stays a server component.
  */
 export function Footer() {
   const year = new Date().getFullYear();
@@ -62,24 +60,17 @@ export function Footer() {
 
         <nav aria-label="Social links" className="flex items-center gap-1.5">
           {socials.map(({ label, href, icon: Icon, external }) => (
-            <Magnetic key={label} strength={0.5}>
+            <Button key={label} asChild variant="outline" size="icon">
               <Link
                 aria-label={label}
                 href={href}
                 {...(external
                   ? { target: "_blank", rel: "noreferrer" }
                   : {})}
-                className={cn(
-                  "group inline-flex h-10 w-10 items-center justify-center rounded-lg",
-                  "border border-border/60 bg-card/40 text-muted-foreground backdrop-blur",
-                  "transition-colors duration-200",
-                  "hover:border-brand/60 hover:text-brand hover:glow-brand",
-                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-background",
-                )}
               >
-                <Icon className="h-4 w-4 transition-transform duration-200 group-hover:scale-110" />
+                <Icon className="h-4 w-4" />
               </Link>
-            </Magnetic>
+            </Button>
           ))}
         </nav>
       </div>
