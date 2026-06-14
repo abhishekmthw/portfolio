@@ -107,7 +107,7 @@ export function HoverCard({
       onMouseMove={usesPointer ? onMove : undefined}
       onMouseLeave={usesPointer ? onLeave : undefined}
       className={cn(
-        "group relative h-full overflow-hidden rounded-xl transition-all duration-300 ease-out [transform-style:preserve-3d]",
+        "group relative h-full overflow-hidden rounded-3xl transition-all duration-300 ease-out [transform-style:preserve-3d]",
         !bare && "glass border border-border/60",
         !reduce &&
           effect === "lift" &&

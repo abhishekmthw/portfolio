@@ -48,7 +48,8 @@ export function Experience() {
   const scaleY = useTransform(fill, (v) => (reduceMotion ? 1 : v));
 
   return (
-    <section id="experience" className="container scroll-mt-20 py-24">
+    <section id="experience" className="relative scroll-mt-24 px-6 py-24 sm:px-10 lg:px-16 lg:py-36">
+      <div className="w-full lg:ml-auto lg:max-w-[40rem]">
       <SectionHeading
         eyebrow="experience"
         title="Where I&rsquo;ve worked."
@@ -83,6 +84,7 @@ export function Experience() {
           <CommitNode key={`${job.company}-${job.period}`} job={job} index={idx} />
         ))}
       </ol>
+      </div>
     </section>
   );
 }

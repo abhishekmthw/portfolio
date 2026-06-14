@@ -3,53 +3,46 @@
 import dynamic from "next/dynamic";
 
 /**
- * Lightweight CSS-only fallback painted under/instead of the WebGL scene:
- * an animated panning grid plus a soft brand/brand2 glow. Shown until the
- * R3F scene loads, and is the permanent backdrop for users who never get
- * the canvas (it's also a no-op under reduced-motion thanks to globals.css).
+ * CSS-only fallback painted under/instead of the WebGL field: a sparse static
+ * violet drift on the void. Shown until the R3F scene streams in, and the
+ * permanent backdrop for anyone who never gets the canvas (also a no-op under
+ * reduced-motion via globals.css).
  */
-function HeroSceneFallback() {
+function FieldFallback() {
   return (
     <div className="absolute inset-0" aria-hidden="true">
-      <div className="bg-grid-pan bg-radial-fade absolute inset-0 opacity-50" />
-      <div className="animate-float absolute -top-24 left-1/2 h-[440px] w-[860px] -translate-x-1/2 rounded-full bg-brand/20 blur-3xl" />
-      <div className="absolute right-[8%] top-1/3 h-[320px] w-[320px] rounded-full bg-brand2/10 blur-3xl" />
+      <div className="bg-grid-pan bg-radial-fade absolute inset-0 opacity-[0.12]" />
+      <div className="absolute left-1/2 top-1/2 h-[520px] w-[520px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-brand/15 blur-3xl" />
     </div>
   );
 }
 
-// The WebGL hero scene MUST be client-only (React Three Fiber v8 / drei v9)
-// and loaded via next/dynamic with ssr:false, with the CSS fallback shown
-// while it streams in.
-const HeroScene = dynamic(() => import("@/components/three/hero-scene"), {
+// React Three Fiber v8 must be client-only; load via next/dynamic (ssr:false)
+// with the CSS fallback shown while it streams.
+const ParticleField = dynamic(() => import("@/components/three/particle-field"), {
   ssr: false,
-  loading: () => <HeroSceneFallback />,
+  loading: () => <FieldFallback />,
 });
 
 /**
- * 3D backdrop anchored to the TOP of the Hero + About region. It's a normal
- * (non-sticky) viewport-tall layer, so the wireframe stays at the top and
- * scrolls away naturally with the page. The terrain is framed to fit fully
- * within this viewport-height layer (see hero-scene.tsx), so it isn't clipped
- * at the bottom edge; the bottom is also feathered (hero-scene-fade) as a
- * safety net.
+ * ConstellationBackdrop — a FIXED, page-spanning layer behind all content. The
+ * particle field reads global scroll progress, so it persists across every
+ * section and morphs brain → bulb → globe as the visitor scrolls the page.
  *
- * Place this as the first child of a `relative` wrapper around <Hero/> +
- * <About/>; the outer layer spans that wrapper and the inner layer occupies
- * the top viewport.
+ * Mount once at the page root (behind <main/>). A soft radial vignette keeps
+ * copy legible where the field is densest, without breaking the pure void.
  */
-export function HeroBackdrop() {
+export function ConstellationBackdrop() {
   return (
-    <div className="pointer-events-none absolute inset-0 -z-10">
-      <div className="hero-scene-fade absolute inset-x-0 top-0 h-[100svh] overflow-hidden">
-        <HeroScene />
-        <HeroSceneFallback />
-        {/* Readability scrim — darkens the left, where the hero/about copy sits. */}
-        <div
-          aria-hidden="true"
-          className="absolute inset-0 bg-gradient-to-r from-background via-background/70 to-transparent"
-        />
-      </div>
+    <div
+      aria-hidden="true"
+      className="pointer-events-none fixed inset-0 -z-10 overflow-hidden"
+    >
+      <ParticleField />
+      <FieldFallback />
+      {/* gentle edge vignette — keeps the docked model bright while softening
+          the extreme corners so side-docked content stays legible */}
+      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_70%,hsl(var(--background)/0.75)_100%)]" />
     </div>
   );
 }

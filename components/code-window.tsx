@@ -19,7 +19,7 @@ export function CodeWindow({ children, title, className, lang }: Props) {
   return (
     <div
       className={cn(
-        "glass overflow-hidden rounded-xl border border-border/60",
+        "glass overflow-hidden rounded-3xl border border-border/60",
         className
       )}
     >

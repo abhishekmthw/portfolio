@@ -13,7 +13,8 @@ import { cn } from "@/lib/utils";
 
 export function About() {
   return (
-    <section id="about" className="container scroll-mt-20 py-24">
+    <section id="about" className="relative scroll-mt-24 px-6 py-24 sm:px-10 lg:px-16 lg:py-36">
+      <div className="w-full lg:ml-auto lg:max-w-[40rem]">
       <SectionHeading
         eyebrow="About"
         title="A full stack developer who ships."
@@ -80,6 +81,7 @@ export function About() {
           </span>
         </div>
       </Reveal>
+      </div>
     </section>
   );
 }

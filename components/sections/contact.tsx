@@ -43,7 +43,7 @@ function ContactLink({ href, icon: Icon, label, value, external }: ContactLinkPr
       href={href}
       {...(external ? { target: "_blank", rel: "noreferrer" } : {})}
       className={cn(
-        "glass group flex items-center gap-3 rounded-lg px-4 py-3 transition-colors",
+        "glass group flex items-center gap-3 rounded-2xl px-4 py-3 transition-colors",
         "hover:border-brand/50 hover:text-foreground"
       )}
     >
@@ -65,8 +65,9 @@ function ContactLink({ href, icon: Icon, label, value, external }: ContactLinkPr
 
 export function Contact() {
   return (
-    <section id="contact" className="container scroll-mt-20 py-24">
-      <div className="relative overflow-hidden rounded-2xl border border-border/60 p-6 sm:p-10 md:p-12">
+    <section id="contact" className="relative scroll-mt-24 px-6 py-24 sm:px-10 lg:px-16 lg:py-36">
+      <div className="w-full lg:mr-auto lg:max-w-[52rem]">
+      <div className="relative overflow-hidden rounded-3xl border border-border/60 p-6 sm:p-10 md:p-12">
         {/* Ambient background: animated panning grid + aurora glow, faded out. */}
         <div className="pointer-events-none absolute inset-0" aria-hidden="true">
           <div className="bg-grid-pan bg-radial-fade absolute inset-0 opacity-[0.18]" />
@@ -82,23 +83,22 @@ export function Contact() {
             align="center"
           />
 
-          <div className="mx-auto grid max-w-4xl items-center gap-8 md:grid-cols-2">
+          <div className="mx-auto grid max-w-4xl grid-cols-1 items-center gap-8 md:grid-cols-2">
             {/* Left: a self-introducing terminal. */}
-            <Reveal y={20}>
+            <Reveal y={20} className="min-w-0">
               <Terminal
                 title="contact.sh"
                 prompt="$"
                 lines={terminalLines}
-                className="glow-brand"
               />
             </Reveal>
 
             {/* Right: the actual reach-out actions, framed as a config window. */}
-            <Reveal y={20} delay={0.1}>
+            <Reveal y={20} delay={0.1} className="min-w-0">
               <CodeWindow title="reach-out.config" lang="links">
                 <div className="flex flex-col gap-4">
                   {/* Primary CTA: magnetic email button. */}
-                  <Button asChild size="lg" className="glow-brand w-full">
+                  <Button asChild size="lg" className="w-full">
                     <Link href={`mailto:${profile.email}`}>
                       <Mail className="h-4 w-4" />
                       <span className="truncate">{profile.email}</span>
@@ -138,6 +138,7 @@ export function Contact() {
             </Reveal>
           </div>
         </div>
+      </div>
       </div>
     </section>
   );

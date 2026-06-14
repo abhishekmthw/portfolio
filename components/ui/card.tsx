@@ -8,7 +8,8 @@ const Card = React.forwardRef<
   <div
     ref={ref}
     className={cn(
-      "rounded-xl border border-border bg-card text-card-foreground shadow-sm",
+      // Dala: a "card" is just a hairline on the void — 24px radius, no shadow.
+      "rounded-3xl border border-border bg-card text-card-foreground",
       className
     )}
     {...props}

@@ -5,24 +5,26 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
+  // Dala geometry: full pills (24px+ radius), uppercase mono label, no shadow.
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-full font-mono text-xs font-semibold uppercase tracking-[0.08em] ring-offset-background transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
   {
     variants: {
       variant: {
-        // hover = brand glow border (no fill/color shift)
+        // The single filled chromatic surface — violet on the void.
         default:
-          "border border-transparent bg-brand text-brand-foreground shadow-sm shadow-brand/25 hover:border-brand hover:shadow-[0_0_24px_-2px_hsl(var(--brand)/0.65)]",
+          "bg-brand text-brand-foreground hover:opacity-90",
+        // Hairline pill that warms to violet on hover.
         outline:
-          "border border-border bg-transparent hover:border-brand/70 hover:text-brand hover:shadow-[0_0_24px_-4px_hsl(var(--brand)/0.55)]",
+          "border border-border bg-transparent hover:border-brand/70 hover:text-brand",
         ghost: "hover:bg-accent hover:text-accent-foreground",
         secondary:
           "bg-secondary text-secondary-foreground hover:bg-secondary/80",
         link: "text-brand underline-offset-4 hover:underline",
       },
       size: {
-        default: "h-10 px-4 py-2",
-        sm: "h-9 rounded-md px-3",
-        lg: "h-11 rounded-md px-8",
+        default: "h-10 px-5 py-2",
+        sm: "h-9 px-4",
+        lg: "h-12 px-7",
         icon: "h-10 w-10",
       },
     },

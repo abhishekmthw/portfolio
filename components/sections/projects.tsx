@@ -29,7 +29,7 @@ function ProjectCard({ project }: { project: Project }) {
     project.links?.live || project.links?.repo || project.links?.case_study;
 
   return (
-    <HoverCard className="group h-full overflow-hidden rounded-2xl border-border/60">
+    <HoverCard className="group h-full overflow-hidden rounded-3xl border-border/60">
       {/* Animated gradient accent from the data-driven project.accent. */}
       <div
         className={cn(
@@ -102,7 +102,7 @@ function ProjectCard({ project }: { project: Project }) {
           {hasLinks && (
             <div className="flex flex-wrap items-center gap-2 pt-2">
               {project.links?.live && (
-                <Button asChild size="sm" className="glow-brand">
+                <Button asChild size="sm">
                   <Link
                     href={project.links.live}
                     target="_blank"
@@ -143,13 +143,14 @@ function ProjectCard({ project }: { project: Project }) {
 
 export function Projects() {
   return (
-    <section id="projects" className="container scroll-mt-20 py-24">
+    <section id="projects" className="relative scroll-mt-24 px-6 py-24 sm:px-10 lg:px-16 lg:py-36">
+      <div className="w-full lg:mr-auto lg:max-w-[40rem]">
       <SectionHeading
         eyebrow="projects"
         title="Things I&rsquo;ve built."
         description="Side projects and product work I want to put my name on. More on the way."
       />
-      <div className="grid items-start gap-6 md:grid-cols-2">
+      <div className="grid items-start gap-8">
         {projects.map((project, idx) => (
           <Reveal key={project.slug} delay={idx * 0.08} y={20}>
             {/* Gentle parallax depth alternating between columns. */}
@@ -158,6 +159,7 @@ export function Projects() {
             </Parallax>
           </Reveal>
         ))}
+      </div>
       </div>
     </section>
   );

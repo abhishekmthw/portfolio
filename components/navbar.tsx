@@ -94,7 +94,7 @@ export function Navbar() {
       className={cn(
         "fixed inset-x-0 top-0 z-50 transition-all duration-300",
         scrolled
-          ? "border-b border-brand/25 bg-background/70 shadow-[0_4px_30px_-12px_hsl(var(--brand)/0.45)] backdrop-blur-xl"
+          ? "border-b border-border bg-background/70 backdrop-blur-xl"
           : "border-b border-transparent bg-transparent"
       )}
     >
@@ -165,7 +165,11 @@ export function Navbar() {
           })}
         </nav>
 
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-2">
+          {/* Terminal action — the only filled pill in the header (Dala). */}
+          <Button asChild size="sm" className="hidden md:inline-flex">
+            <Link href="#contact">Get in touch</Link>
+          </Button>
           <ThemeToggle />
           <Button
             variant="ghost"

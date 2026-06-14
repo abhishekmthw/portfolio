@@ -28,14 +28,14 @@ export function SectionHeading({
     >
       {eyebrow && (
         <Reveal y={8}>
-          <span className="font-mono text-xs tracking-tight text-syntax-comment">
-            <span className="text-syntax-keyword">{"// "}</span>
+          <span className="font-mono text-xs uppercase tracking-[0.18em] text-syntax-comment">
+            <span className="text-brand">{"// "}</span>
             {eyebrow}
           </span>
         </Reveal>
       )}
       <Reveal y={12} delay={0.05}>
-        <h2 className="text-3xl font-semibold tracking-tight sm:text-4xl">
+        <h2 className="text-display text-4xl sm:text-5xl lg:text-[3.5rem]">
           {title}
         </h2>
       </Reveal>

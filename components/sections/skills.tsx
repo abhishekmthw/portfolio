@@ -23,14 +23,15 @@ function toModuleName(category: string): string {
 
 export function Skills() {
   return (
-    <section id="skills" className="container scroll-mt-20 py-24">
+    <section id="skills" className="relative scroll-mt-24 px-6 py-24 sm:px-10 lg:px-16 lg:py-36">
+      <div className="w-full lg:mr-auto lg:max-w-[40rem]">
       <SectionHeading
         eyebrow="skills"
         title="Tools I reach for."
         description="The stack I use day to day, grouped by where it lives."
       />
 
-      <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid gap-6 sm:grid-cols-2">
         {skills.map((group, index) => {
           const moduleName = toModuleName(group.category);
           return (
@@ -56,7 +57,7 @@ export function Skills() {
                     <li key={item}>
                       <span
                         className={cn(
-                          "inline-flex items-center rounded-md border border-border/60 bg-muted/40 px-2.5 py-1",
+                          "inline-flex items-center rounded-full border border-border/60 bg-muted/40 px-3 py-1",
                           "font-mono text-xs text-muted-foreground"
                         )}
                       >
@@ -81,6 +82,7 @@ export function Skills() {
             </Reveal>
           );
         })}
+      </div>
       </div>
     </section>
   );

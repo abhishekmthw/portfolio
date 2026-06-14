@@ -67,6 +67,8 @@ const config = {
           foreground: "hsl(var(--brand-foreground))",
         },
         brand2: "hsl(var(--brand-2))",
+        amber: "hsl(var(--amber-spark))",
+        lichen: "hsl(var(--lichen))",
         syntax: {
           comment: "hsl(var(--syntax-comment))",
           keyword: "hsl(var(--syntax-keyword))",

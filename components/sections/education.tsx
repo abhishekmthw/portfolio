@@ -10,7 +10,8 @@ import { education, accomplishments } from "@/data/education";
 
 export function Education() {
   return (
-    <section id="education" className="container scroll-mt-20 py-24">
+    <section id="education" className="relative scroll-mt-24 px-6 py-24 sm:px-10 lg:px-16 lg:py-36">
+      <div className="w-full lg:ml-auto lg:max-w-[52rem]">
       <SectionHeading
         eyebrow="education"
         title="Background."
@@ -114,6 +115,7 @@ export function Education() {
             </Reveal>
           ))}
         </div>
+      </div>
       </div>
     </section>
   );
