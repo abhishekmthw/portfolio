@@ -4,15 +4,15 @@ import dynamic from "next/dynamic";
 
 /**
  * CSS-only fallback painted under/instead of the WebGL field: a sparse static
- * violet drift on the void. Shown until the R3F scene streams in, and the
- * permanent backdrop for anyone who never gets the canvas (also a no-op under
- * reduced-motion via globals.css).
+ * grid drift on the void. Shown until the R3F scene streams in, and the permanent
+ * backdrop for anyone who never gets the canvas (also a no-op under reduced-motion
+ * via globals.css). Intentionally NO centered glow blob — that read as a fixed
+ * glow in the middle of the screen behind the (side-docked, moving) 3D model.
  */
 function FieldFallback() {
   return (
     <div className="absolute inset-0" aria-hidden="true">
       <div className="bg-grid-pan bg-radial-fade absolute inset-0 opacity-[0.12]" />
-      <div className="absolute left-1/2 top-1/2 h-[520px] w-[520px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-brand/15 blur-3xl" />
     </div>
   );
 }

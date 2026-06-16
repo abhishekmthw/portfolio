@@ -6,6 +6,8 @@ import { useReducedMotion } from "framer-motion";
 import { useTheme } from "next-themes";
 import * as THREE from "three";
 
+import { setModelTransitioning } from "@/components/three/model-phase";
+
 /**
  * ParticleField — the "Dala" constellation, ported and choreographed.
  *
@@ -36,14 +38,20 @@ import * as THREE from "three";
 // count is shared across every morph shape, which only makes the rest richer too)
 const POINT_COUNT = 3600;
 const STAR_COUNT = 3500;
-// tiny white sea dots that fill the ocean between continents on the world globe
-const OCEAN_COUNT = 3000;
+// white sea dots that fill the ocean between continents on the world globe —
+// denser than the land so the sea reads as a full surface, evenly distributed
+const OCEAN_COUNT = 6000;
 const LINKS_PER_POINT = 1;
 
 // Overall size of the morphing model. Bump this to scale every shape together;
 // the starfield and the full-screen scatter spread are deliberately left
 // independent of it so only the docked object grows.
 const MODEL_SCALE = 1.35;
+
+// Radius of the world-globe shell (land + ocean dots sit on it). Kept as
+// a named constant because the hover lens also needs it: the globe's lit face
+// sits at z≈+GLOBE_RADIUS, which the cursor projection must account for.
+const GLOBE_RADIUS = 1.5 * MODEL_SCALE;
 
 // The hero </> is the page's headline mark, so it sits larger than the matching
 // About </> it morphs into. Applied as a group scale on section 0 only that eases
@@ -52,10 +60,11 @@ const MODEL_SCALE = 1.35;
 const HERO_SCALE = 1.3;
 
 // Hover "lens": every point within HOVER_RADIUS (cloud-local units; the model
-// spans ~±2.7 after MODEL_SCALE) of the cursor IN THE SCREEN PLANE (x/y, depth
-// ignored — so it works on the hollow globe too) swells to (1 + HOVER_GROW)× its
+// spans ~±2.7 after MODEL_SCALE) of the cursor swells to (1 + HOVER_GROW)× its
 // base size and is parted outward by HOVER_SPREAD to make room for the larger
-// dots. Strongest right under the pointer, easing to zero at the rim.
+// dots. Strongest right under the pointer, easing to zero at the rim. The cursor
+// is projected onto the shape's front-surface depth (see refZ in useFrame) so the
+// magnified patch tracks the pointer even on the off-centre, z-offset globe.
 const HOVER_RADIUS = 1.3;
 const HOVER_R2 = HOVER_RADIUS * HOVER_RADIUS;
 const HOVER_GROW = 0.2;
@@ -109,17 +118,64 @@ const INDIA_LON = 78;
 // Asia into full view instead of leaving the equatorial Indian Ocean facing front.
 const GLOBE_TILT_DEG = 30;
 
+// Real coastline geometry, loaded lazily from /data/land-110m.json (Natural
+// Earth 1:110m, public domain): an array of polygons, each an array of rings
+// (ring 0 = outer, the rest = holes/lakes), each ring an array of [lon, lat].
+// Null until the fetch resolves (and on SSR / fetch failure), in which case the
+// globe falls back to the coarse hand-coded polygons in drawWorldMapFallback.
+type Ring = number[][];
+type Polygon = Ring[];
+let WORLD_LAND: Polygon[] | null = null;
+
+/** Equirectangular (lon, lat)→pixel mapping shared by the map drawers. */
+const lonLatToXY = (lon: number, lat: number, W: number, H: number): [number, number] => [
+  ((lon + 180) / 360) * W,
+  ((90 - lat) / 180) * H,
+];
+
 /**
- * Rough equirectangular world map: filled white land over transparent ocean,
- * coarse continent outlines in (lon, lat) degrees. Detail is deliberately low —
- * the globe samples this into ~2400 dots, so continent shapes read, not borders.
- * Hand-authored (no image asset), accuracy is approximate.
+ * Render the loaded Natural Earth land polygons as filled white land over a
+ * transparent ocean. Every ring is added to one path and filled with the
+ * even-odd rule, so holes (e.g. the Caspian) read as water and disjoint
+ * continents fill independently. Antarctica's [180,-90]→[-180,-90] edge draws
+ * along the bottom row, correctly filling the cap down to the pole.
+ */
+function drawLandGeo(ctx: CanvasRenderingContext2D, W: number, H: number, polys: Polygon[]) {
+  ctx.beginPath();
+  for (const rings of polys) {
+    for (const ring of rings) {
+      for (let i = 0; i < ring.length; i++) {
+        const [x, y] = lonLatToXY(ring[i][0], ring[i][1], W, H);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+    }
+  }
+  ctx.fill("evenodd");
+}
+
+/**
+ * Equirectangular world map: filled white land over transparent ocean. Prefers
+ * the accurate Natural Earth coastlines once loaded; until then it falls back to
+ * the coarse hand-authored polygons below. The globe samples this mask into dots,
+ * so continent SHAPES read (not borders).
  */
 function drawWorldMap(ctx: CanvasRenderingContext2D, W: number, H: number) {
-  const P = (lon: number, lat: number): [number, number] => [
-    ((lon + 180) / 360) * W,
-    ((90 - lat) / 180) * H,
-  ];
+  if (WORLD_LAND) {
+    drawLandGeo(ctx, W, H, WORLD_LAND);
+    return;
+  }
+  drawWorldMapFallback(ctx, W, H);
+}
+
+/**
+ * Coarse hand-authored fallback (approximate, ~15 vertices per continent) used
+ * only before the Natural Earth data loads or if that fetch fails — so the globe
+ * always has sensible land rather than a blank or uniform sphere.
+ */
+function drawWorldMapFallback(ctx: CanvasRenderingContext2D, W: number, H: number) {
+  const P = (lon: number, lat: number): [number, number] => lonLatToXY(lon, lat, W, H);
   const poly = (pts: number[][]) => {
     ctx.beginPath();
     pts.forEach(([lon, lat], i) => {
@@ -165,17 +221,38 @@ function drawWorldMap(ctx: CanvasRenderingContext2D, W: number, H: number) {
   ctx.fillRect(0, P(0, -66)[1], W, H - P(0, -66)[1]);
 }
 
+// Fibonacci-lattice sizes for the EVEN globe sampling. A lattice of this many
+// points (uniform spacing on the sphere) is classified against the land mask and
+// the wanted points are kept, then evenly decimated to the exact buffer size.
+// GLOBE_LATTICE feeds the (sparse) morph-cloud globe + the ocean; the dense land
+// fill uses its own, much larger lattice below.
+const GLOBE_LATTICE = 16000;
+// Dense LAND FILL — the morph cloud's land is only POINT_COUNT dots (far too
+// sparse), so the continents are filled by a separate dense cloud sampled from a
+// large Fibonacci lattice (uniform spacing → no empty patches). Keep the kept-land
+// count comfortably below LANDFILL_LATTICE's land total so decimation is ~1:1.
+const LANDFILL_LATTICE = 170000;
+const LANDFILL_COUNT = 48000;
+
 /**
- * World globe — sample the land mask and wrap it onto a sphere shell, rotating
- * India's longitude to the front (+z, toward the camera). Sampling is
- * area-corrected (reject by cos(lat)) so the equirectangular poles don't
- * over-fill; oceans get no points, so the continents read as land vs. empty sea.
+ * Even globe sampler. Lays a Fibonacci (golden-angle) lattice over the sphere —
+ * uniform spacing, NO randomness — classifies each point against the Natural
+ * Earth land mask via `keep`, then EVENLY decimates the kept points to exactly
+ * `target`. So the dots are regularly spaced over their region instead of
+ * randomly clustered with gaps. Positions are rotated so India faces the camera
+ * (+z) and pitched by GLOBE_TILT_DEG, matching every globe layer. `latticeN` must
+ * be large enough that the kept set ≥ target (else points repeat at the tail).
  */
-function makeWorldGlobe(n: number, radius: number): Float32Array {
-  const out = new Float32Array(n * 3);
+function sampleGlobeLattice(
+  target: number,
+  radius: number,
+  latticeN: number,
+  keep: (isLand: (lonDeg: number, latDeg: number) => boolean, lonDeg: number, latDeg: number) => boolean
+): Float32Array {
+  const out = new Float32Array(target * 3);
   if (typeof document === "undefined") return out;
-  const W = 360;
-  const H = 180;
+  const W = 720;
+  const H = 360;
   const canvas = document.createElement("canvas");
   canvas.width = W;
   canvas.height = H;
@@ -185,92 +262,64 @@ function makeWorldGlobe(n: number, radius: number): Float32Array {
   ctx.fillStyle = "#fff";
   drawWorldMap(ctx, W, H);
   const data = ctx.getImageData(0, 0, W, H).data;
-  const land: number[] = [];
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      if (data[(y * W + x) * 4 + 3] > 100) land.push(x, y);
+  // land test in degrees; longitude wraps at the antimeridian, latitude clamps
+  const isLand = (lonDeg: number, latDeg: number) => {
+    let px = Math.floor(((lonDeg + 180) / 360) * W);
+    let py = Math.floor(((90 - latDeg) / 180) * H);
+    px = ((px % W) + W) % W;
+    py = py < 0 ? 0 : py >= H ? H - 1 : py;
+    return data[(py * W + px) * 4 + 3] > 100;
+  };
+  // collect kept lattice points as (lat, lon) in radians
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  const keptLat: number[] = [];
+  const keptLon: number[] = [];
+  for (let i = 0; i < latticeN; i++) {
+    const y = 1 - ((i + 0.5) / latticeN) * 2; // +1 → -1, equal-area in y
+    const lat = Math.asin(y < -1 ? -1 : y > 1 ? 1 : y);
+    let lon = (golden * i) % (2 * Math.PI);
+    if (lon > Math.PI) lon -= 2 * Math.PI; // [-π, π]
+    if (keep(isLand, (lon * 180) / Math.PI, (lat * 180) / Math.PI)) {
+      keptLat.push(lat);
+      keptLon.push(lon);
     }
   }
-  const landN = land.length / 2;
+  const L = keptLat.length;
+  if (L === 0) return out;
   const lon0 = (INDIA_LON * Math.PI) / 180;
   const tilt = (GLOBE_TILT_DEG * Math.PI) / 180;
   const ct = Math.cos(tilt);
   const st = Math.sin(tilt);
-  for (let i = 0; i < n; i++) {
-    let lat = 0;
-    let lam = 0; // longitude relative to India (0 = facing the camera)
-    if (landN > 0) {
-      // pick a land pixel, area-corrected by cos(lat) so the equirectangular
-      // poles don't over-fill. Full sphere (both hemispheres) so it reads as a
-      // balanced globe; India's longitude is rotated to the front below.
-      for (let tries = 0; tries < 12; tries++) {
-        const k = Math.floor(Math.random() * landN) * 2;
-        const px = land[k] + Math.random();
-        const py = land[k + 1] + Math.random();
-        lat = Math.PI / 2 - (py / H) * Math.PI;
-        lam = (px / W) * 2 * Math.PI - Math.PI - lon0;
-        if (Math.random() <= Math.cos(lat)) break;
-      }
-    } else {
-      lam = Math.random() * 2 * Math.PI - Math.PI;
-      lat = Math.asin(2 * Math.random() - 1);
-    }
+  for (let j = 0; j < target; j++) {
+    const idx = Math.min(L - 1, Math.floor((j * L) / target)); // even decimation
+    const lat = keptLat[idx];
+    const lam = keptLon[idx] - lon0; // longitude relative to India (front = +z)
     const cl = Math.cos(lat);
     const x0 = radius * cl * Math.sin(lam);
     const y0 = radius * Math.sin(lat);
     const z0 = radius * cl * Math.cos(lam);
-    // pitch about X — tilt the northern hemisphere (Asia) toward the camera
-    out[i * 3] = x0;
-    out[i * 3 + 1] = y0 * ct - z0 * st;
-    out[i * 3 + 2] = y0 * st + z0 * ct;
+    out[j * 3] = x0;
+    out[j * 3 + 1] = y0 * ct - z0 * st; // pitch about X (Asia toward the camera)
+    out[j * 3 + 2] = y0 * st + z0 * ct;
   }
   return out;
 }
 
-/**
- * Ocean glints — tiny dots scattered over the SEA of the same globe. Samples the
- * sphere area-uniformly and keeps points where the land mask is water, using the
- * identical India-front + tilt orientation and radius as makeWorldGlobe, so they
- * fill the empty water between the continents and the whole sphere reads as Earth.
- */
+/** World globe — land dots, evenly spaced over every landmass. */
+function makeWorldGlobe(n: number, radius: number): Float32Array {
+  return sampleGlobeLattice(n, radius, GLOBE_LATTICE, (isLand, lon, lat) => isLand(lon, lat));
+}
+
+/** Dense land fill — the SAME land sampling, but from a much denser lattice so the
+ *  continents are packed evenly with no empty patches. A separate cloud; the sparse
+ *  POINT_COUNT morph globe stays only to drive the transition. */
+function makeGlobeLandFill(n: number, radius: number): Float32Array {
+  return sampleGlobeLattice(n, radius, LANDFILL_LATTICE, (isLand, lon, lat) => isLand(lon, lat));
+}
+
+/** Ocean glints — evenly spaced over the sea (the land lattice's complement). */
 function makeGlobeOcean(n: number, radius: number): Float32Array {
-  const out = new Float32Array(n * 3);
-  if (typeof document === "undefined") return out;
-  const W = 360;
-  const H = 180;
-  const canvas = document.createElement("canvas");
-  canvas.width = W;
-  canvas.height = H;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return out;
-  ctx.clearRect(0, 0, W, H);
-  ctx.fillStyle = "#fff";
-  drawWorldMap(ctx, W, H);
-  const data = ctx.getImageData(0, 0, W, H).data;
-  const lon0 = (INDIA_LON * Math.PI) / 180;
-  const tilt = (GLOBE_TILT_DEG * Math.PI) / 180;
-  const ct = Math.cos(tilt);
-  const st = Math.sin(tilt);
-  for (let i = 0; i < n; i++) {
-    let lat = 0;
-    let lon = 0;
-    for (let tries = 0; tries < 12; tries++) {
-      lon = Math.random() * 2 * Math.PI - Math.PI;
-      lat = Math.asin(2 * Math.random() - 1); // area-uniform over the sphere
-      const px = Math.min(W - 1, Math.floor(((lon + Math.PI) / (2 * Math.PI)) * W));
-      const py = Math.min(H - 1, Math.floor(((Math.PI / 2 - lat) / Math.PI) * H));
-      if (data[(py * W + px) * 4 + 3] <= 100) break; // keep only sea pixels
-    }
-    const lam = lon - lon0;
-    const cl = Math.cos(lat);
-    const x0 = radius * cl * Math.sin(lam);
-    const y0 = radius * Math.sin(lat);
-    const z0 = radius * cl * Math.cos(lam);
-    out[i * 3] = x0;
-    out[i * 3 + 1] = y0 * ct - z0 * st;
-    out[i * 3 + 2] = y0 * st + z0 * ct;
-  }
-  return out;
+  return sampleGlobeLattice(n, radius, GLOBE_LATTICE, (isLand, lon, lat) => !isLand(lon, lat));
 }
 
 /**
@@ -473,6 +522,10 @@ function makeDotTexture(): THREE.Texture | null {
 }
 
 // ---------------------------------------------------------------- palette
+// The bright globe particle color, used by the dense land-fill cloud and by the
+// land morph cloud's globe tint so the whole globe reads as one particle style.
+const GLOBE_DOT_COLOR = (dark: boolean) => (dark ? "#f3f1ff" : "#3a2d8f");
+
 function buildColors(n: number, dark: boolean): Float32Array {
   // Shades of violet around the Plum Voltage brand (#8052ff), keyed to the
   // site: a near-white lavender core (the beam's bright head), then pale →
@@ -493,6 +546,88 @@ function buildColors(n: number, dark: boolean): Float32Array {
   return out;
 }
 
+// ---------------------------------------------------------------- point material
+// Shared by the morphing model, the dense land fill AND the ocean dots so size
+// can vary PER POINT (THREE.PointsMaterial only exposes one global size).
+// Reproduces the PointsMaterial look: vertex color × soft sprite alpha,
+// perspective size attenuation (uScale/-z, matching three's own formula),
+// theme-aware additive/normal blend, plus the slow per-particle shimmer.
+//
+// uGlobeness (0→1) drives a FRONT/BACK fade for the world globe: the globe is a
+// hollow shell centred at the local origin, so each surface point's radial
+// direction is its sphere normal — points whose normal faces away from the camera
+// (the far hemisphere) fade out and shrink, so only the side facing the screen
+// shows and the back doesn't bleed through. At uGlobeness 0 (the flat glyph
+// shapes) the fade is a no-op. uSize/uScale/uOpacity/uTime/uShimmer/uGlobeness
+// are refreshed each frame in useFrame.
+const POINT_VERTEX_SHADER = `
+  attribute vec3 aColor;
+  attribute float aSize;
+  attribute float aPhase;
+  uniform float uSize;
+  uniform float uScale;
+  uniform float uTime;
+  uniform float uShimmer;
+  uniform float uGlobeness;
+  uniform vec3 uTint;
+  uniform float uTintAmount;
+  varying vec3 vColor;
+  varying float vFront;
+  void main() {
+    // slow per-particle brightness drift (per-point phase + speed jitter)
+    float spd = ${SHIMMER_FREQ.toFixed(3)} * (0.6 + 0.8 * fract(aPhase * 0.31831));
+    float s = ${SHIMMER_MIN.toFixed(3)} + ${(1 - SHIMMER_MIN).toFixed(3)} * (0.5 + 0.5 * sin(uTime * spd + aPhase));
+    float bright = mix(1.0, s, uShimmer);
+    // uTintAmount shifts the per-vertex color toward uTint — the land cloud uses
+    // this to match the dense land fill's bright color on the globe (amount = globeness),
+    // while the flat glyph shapes (amount 0) keep their own palette.
+    vColor = mix(aColor, uTint, uTintAmount) * bright;
+    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    // front/back fade — normal is the radial direction on the globe shell; its
+    // view-space z is +1 toward the camera (front), -1 away (back). Keep the front
+    // cap + limb bright, fade the far hemisphere to nothing. Gated by uGlobeness.
+    float plen = length(position);
+    vec3 nrm = plen > 1e-4 ? position / plen : vec3(0.0, 0.0, 1.0);
+    float facing = normalize(normalMatrix * nrm).z;
+    vFront = mix(1.0, smoothstep(-0.25, 0.1, facing), uGlobeness);
+    // back dots also shrink so the limb softens into a blur rather than a hard edge
+    float sizeFade = mix(1.0, 0.4 + 0.6 * vFront, uGlobeness);
+    gl_PointSize = uSize * aSize * sizeFade * (uScale / -mv.z);
+    gl_Position = projectionMatrix * mv;
+  }
+`;
+const POINT_FRAGMENT_SHADER = `
+  uniform sampler2D uMap;
+  uniform float uOpacity;
+  varying vec3 vColor;
+  varying float vFront;
+  void main() {
+    vec4 tex = texture2D(uMap, gl_PointCoord);
+    if (tex.a < 0.02) discard;
+    gl_FragColor = vec4(vColor, uOpacity * tex.a * vFront);
+  }
+`;
+function makePointShaderMaterial(dot: THREE.Texture | null, dark: boolean): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uMap: { value: dot },
+      uSize: { value: 0.05 },
+      uScale: { value: 300 },
+      uOpacity: { value: 1 },
+      uTime: { value: 0 },
+      uShimmer: { value: 1 },
+      uGlobeness: { value: 0 },
+      uTint: { value: new THREE.Color(1, 1, 1) },
+      uTintAmount: { value: 0 },
+    },
+    vertexShader: POINT_VERTEX_SHADER,
+    fragmentShader: POINT_FRAGMENT_SHADER,
+    transparent: true,
+    depthWrite: false,
+    blending: dark ? THREE.AdditiveBlending : THREE.NormalBlending,
+  });
+}
+
 // ---------------------------------------------------------------- scene
 
 function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
@@ -500,7 +635,10 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
   const inner = useRef<THREE.Group>(null);
   const pointsRef = useRef<THREE.Points>(null);
   const linesRef = useRef<THREE.LineSegments>(null);
-  const oceanRef = useRef<THREE.Points>(null); // tiny sea dots, only shown on the globe
+  const oceanRef = useRef<THREE.Points>(null); // sea dots, only shown on the globe
+  const oceanHovered = useRef(false); // whether the ocean buffer currently holds a hover displacement
+  const landFillRef = useRef<THREE.Points>(null); // dense land dots, only on the globe
+  const landFillActive = useRef(false); // whether the land-fill buffer is currently displaced (scatter/hover)
 
   const seg = useRef(0); // target segment (i + f) from scroll
   const segSmooth = useRef(0);
@@ -523,7 +661,7 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
       // smaller than the other shapes so the whole India-facing sphere fits in
       // the open space beside the Contact cards (the eastern/Asia side would
       // otherwise run off the right edge when docked).
-      globe: makeWorldGlobe(POINT_COUNT, 1.5 * MODEL_SCALE),
+      globe: makeWorldGlobe(POINT_COUNT, GLOBE_RADIUS),
     };
     // recenter every shape vertically so each reads as centered on screen — except
     // the globe, a sphere already centered at the origin that must stay there so
@@ -538,9 +676,104 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
   const positions = useMemo(() => Float32Array.from(shapes.brackets), [shapes]);
   const colors = useMemo(() => buildColors(POINT_COUNT, dark), [dark]);
 
-  // static sea dots on the same sphere/radius as the world globe (not centered,
-  // matching the globe shape) — faded in only while the globe is on screen
-  const oceanPos = useMemo(() => makeGlobeOcean(OCEAN_COUNT, 1.5 * MODEL_SCALE), []);
+  // sea dots on the same sphere/radius as the world globe (not centered, matching
+  // the globe shape) — faded in only while the globe is on screen. On the shared
+  // point shader (not PointsMaterial) so the far-hemisphere sea hides and the dots
+  // get the same per-point hover swell as the land. oceanBase is the rest layout;
+  // oceanPositions is the live buffer the hover lens writes into.
+  const oceanBase = useMemo(() => makeGlobeOcean(OCEAN_COUNT, GLOBE_RADIUS), []);
+  const oceanPositions = useMemo(() => Float32Array.from(oceanBase), [oceanBase]);
+  const oceanColors = useMemo(() => {
+    const c = new THREE.Color(dark ? "#ffffff" : "#64748b");
+    const a = new Float32Array(OCEAN_COUNT * 3);
+    for (let i = 0; i < OCEAN_COUNT; i++) {
+      a[i * 3] = c.r;
+      a[i * 3 + 1] = c.g;
+      a[i * 3 + 2] = c.b;
+    }
+    return a;
+  }, [dark]);
+  const oceanSizes = useMemo(() => {
+    const a = new Float32Array(OCEAN_COUNT);
+    a.fill(1);
+    return a;
+  }, []);
+  // ocean doesn't shimmer (uShimmer 0), so phases are unused — zeros satisfy the
+  // shader's aPhase attribute without a per-point twinkle.
+  const oceanPhases = useMemo(() => new Float32Array(OCEAN_COUNT), []);
+
+  // Dense land fill — the continents, evenly packed (Fibonacci lattice). A FULL
+  // participant like the morph cloud: it scatters with the transition and reacts
+  // to the hover lens (see useFrame), so it needs a live buffer + scatter field +
+  // per-point sizes. Bright globe color, driven in useFrame.
+  const landFillBase = useMemo(() => makeGlobeLandFill(LANDFILL_COUNT, GLOBE_RADIUS), []);
+  const landFillPositions = useMemo(() => Float32Array.from(landFillBase), [landFillBase]);
+  const landFillScatter = useMemo(() => {
+    const a = new Float32Array(LANDFILL_COUNT * 3);
+    for (let i = 0; i < a.length; i++) a[i] = Math.random() * 2 - 1;
+    return a;
+  }, []);
+  const landFillSizes = useMemo(() => {
+    const a = new Float32Array(LANDFILL_COUNT);
+    a.fill(1);
+    return a;
+  }, []);
+  const landFillColors = useMemo(() => {
+    const c = new THREE.Color(GLOBE_DOT_COLOR(dark));
+    const a = new Float32Array(LANDFILL_COUNT * 3);
+    for (let i = 0; i < LANDFILL_COUNT; i++) {
+      a[i * 3] = c.r;
+      a[i * 3 + 1] = c.g;
+      a[i * 3 + 2] = c.b;
+    }
+    return a;
+  }, [dark]);
+  const landFillPhases = useMemo(() => {
+    const a = new Float32Array(LANDFILL_COUNT);
+    for (let i = 0; i < LANDFILL_COUNT; i++) a[i] = Math.random() * Math.PI * 2;
+    return a;
+  }, []);
+
+  // Lazily upgrade the coarse fallback continents to real Natural Earth 1:110m
+  // coastlines. The ~75KB file is fetched (not bundled) the first time the field
+  // mounts; once it lands we RE-SAMPLE the globe/ocean/outline clouds in place —
+  // mutating the existing buffers — so the continents snap to accurate shapes.
+  // The globe docks at the last section, so this resolves long before it scrolls
+  // into view. On fetch failure the hand-coded fallback simply stays.
+  useEffect(() => {
+    const rebuild = () => {
+      shapes.globe.set(makeWorldGlobe(POINT_COUNT, GLOBE_RADIUS));
+      oceanBase.set(makeGlobeOcean(OCEAN_COUNT, GLOBE_RADIUS));
+      oceanPositions.set(oceanBase);
+      landFillBase.set(makeGlobeLandFill(LANDFILL_COUNT, GLOBE_RADIUS));
+      landFillPositions.set(landFillBase);
+      if (oceanRef.current)
+        (oceanRef.current.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+      if (landFillRef.current)
+        (landFillRef.current.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+      // the model morph buffer (from shapes.globe) is rewritten every frame in
+      // useFrame; the ocean and land fill move only during transition/hover, so
+      // seed their live buffers from the rebuilt bases here.
+    };
+    if (WORLD_LAND) {
+      rebuild();
+      return;
+    }
+    let cancelled = false;
+    fetch("/data/land-110m.json")
+      .then((r) => r.json())
+      .then((polys: Polygon[]) => {
+        if (cancelled) return;
+        WORLD_LAND = polys;
+        rebuild();
+      })
+      .catch(() => {
+        /* keep the hand-coded fallback */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [shapes, oceanBase, oceanPositions, landFillBase, landFillPositions]);
 
   // soft round sprite shared by both clouds (clips the default square points)
   const dot = useMemo(makeDotTexture, []);
@@ -561,58 +794,21 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     return a;
   }, []);
 
-  // Custom points material so size can vary PER POINT — THREE.PointsMaterial only
-  // exposes one global size. It reproduces the PointsMaterial look: vertex color ×
-  // soft sprite alpha, perspective size attenuation (uScale/-z, matching three's
-  // own formula), theme-aware additive/normal blend. It also adds the slow
-  // per-particle shimmer (brightness drift). uSize/uScale/uOpacity/uTime are
-  // refreshed each frame in useFrame.
-  const modelMaterial = useMemo(() => {
-    return new THREE.ShaderMaterial({
-      uniforms: {
-        uMap: { value: dot },
-        uSize: { value: 0.05 },
-        uScale: { value: 300 },
-        uOpacity: { value: dark ? 0.95 : 0.85 },
-        uTime: { value: 0 },
-        uShimmer: { value: 1 },
-      },
-      vertexShader: `
-        attribute vec3 aColor;
-        attribute float aSize;
-        attribute float aPhase;
-        uniform float uSize;
-        uniform float uScale;
-        uniform float uTime;
-        uniform float uShimmer;
-        varying vec3 vColor;
-        void main() {
-          // slow per-particle brightness drift (per-point phase + speed jitter)
-          float spd = ${SHIMMER_FREQ.toFixed(3)} * (0.6 + 0.8 * fract(aPhase * 0.31831));
-          float s = ${SHIMMER_MIN.toFixed(3)} + ${(1 - SHIMMER_MIN).toFixed(3)} * (0.5 + 0.5 * sin(uTime * spd + aPhase));
-          float bright = mix(1.0, s, uShimmer);
-          vColor = aColor * bright;
-          vec4 mv = modelViewMatrix * vec4(position, 1.0);
-          gl_PointSize = uSize * aSize * (uScale / -mv.z);
-          gl_Position = projectionMatrix * mv;
-        }
-      `,
-      fragmentShader: `
-        uniform sampler2D uMap;
-        uniform float uOpacity;
-        varying vec3 vColor;
-        void main() {
-          vec4 tex = texture2D(uMap, gl_PointCoord);
-          if (tex.a < 0.02) discard;
-          gl_FragColor = vec4(vColor, uOpacity * tex.a);
-        }
-      `,
-      transparent: true,
-      depthWrite: false,
-      blending: dark ? THREE.AdditiveBlending : THREE.NormalBlending,
-    });
-  }, [dot, dark]);
+  // Custom per-point-size material (see makePointShaderMaterial). uSize/uScale/
+  // uOpacity/uTime/uShimmer are refreshed each frame in useFrame.
+  const modelMaterial = useMemo(() => makePointShaderMaterial(dot, dark), [dot, dark]);
   useEffect(() => () => modelMaterial.dispose(), [modelMaterial]);
+  // On the globe the morph cloud's land dots adopt the bright globe color
+  // (uTintAmount = globeness in useFrame) so they match the dense land-fill cloud.
+  useEffect(() => {
+    modelMaterial.uniforms.uTint.value.set(GLOBE_DOT_COLOR(dark));
+  }, [modelMaterial, dark]);
+  // Same shader for the ocean dots so the far-hemisphere sea fades out too.
+  const oceanMaterial = useMemo(() => makePointShaderMaterial(dot, dark), [dot, dark]);
+  useEffect(() => () => oceanMaterial.dispose(), [oceanMaterial]);
+  // Same shader for the dense land fill — the continents.
+  const landFillMaterial = useMemo(() => makePointShaderMaterial(dot, dark), [dot, dark]);
+  useEffect(() => () => landFillMaterial.dispose(), [landFillMaterial]);
 
   // normalized scatter field ([-1,1]) — scaled by the live viewport each frame
   const scatter = useMemo(() => {
@@ -814,6 +1010,12 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     const globeness =
       (ORDER[i] === "globe" ? 1 - mf : 0) + (ORDER[next] === "globe" ? mf : 0);
 
+    // publish the model's transition state so content sections wait for it to
+    // settle before revealing (see Reveal). Settled = entry assembly done AND
+    // docked at a section's hold band (tt ≈ 0 or 1); otherwise it's mid-morph,
+    // scattering, or spinning — i.e. transitioning.
+    setModelTransitioning(!(entry > 0.98 && (tt <= 0.02 || tt >= 0.98)));
+
     // hover detect — is the cursor over the docked cloud's bounding region?
     // Generous thresholds just GATE the lens on/off; the per-point falloff below
     // is what actually keeps it confined to the patch under the pointer.
@@ -842,7 +1044,16 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     const lens = hover.current * (1 - env) * entry;
     let lcx = 1e9, lcy = 0;
     if (lens > 0.001 && inner.current && vw > 0) {
-      cursorLocal.set((pointer.current.x * vw) / 2, (pointer.current.y * vh) / 2, 0);
+      // Map the cursor to the shape's FRONT-SURFACE depth, not the z=0 plane. The
+      // globe's lit face sits at z≈+GLOBE_RADIUS; under perspective a cursor at a
+      // given screen-x maps to a SMALLER world-x there (the viewport narrows toward
+      // the camera), so referencing z=0 made the lens land outboard of the pointer
+      // on the off-centre docked globe. Flat glyphs sit at z≈0, so blend the
+      // reference depth by globeness (0 for glyphs → full radius for the globe).
+      const camZ = state.camera.position.z;
+      const refZ = globeness * GLOBE_RADIUS;
+      const persp = (camZ - refZ) / camZ; // viewport shrinks toward the camera
+      cursorLocal.set((pointer.current.x * vw * persp) / 2, (pointer.current.y * vh * persp) / 2, refZ);
       inner.current.worldToLocal(cursorLocal);
       lcx = cursorLocal.x;
       lcy = cursorLocal.y;
@@ -913,21 +1124,130 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
 
     // ocean sea-dots: only on the settled globe — fade in with globeness, gated
     // off during the scatter (1 - env) so they don't appear while it's dispersed.
-    if (oceanRef.current) {
-      const om = oceanRef.current.material as THREE.PointsMaterial;
-      om.opacity = (dark ? 0.5 : 0.4) * globeness * (1 - env) * entry;
+    // uGlobeness drives the front/back fade so the far-hemisphere sea hides too.
+    const oc = oceanMaterial.uniforms;
+    oc.uSize.value = (dark ? 0.02 : 0.018) * state.gl.getPixelRatio() * (1 + 0.3 * globeness);
+    oc.uScale.value = state.size.height * 0.5;
+    oc.uOpacity.value = (dark ? 0.5 : 0.4) * globeness * (1 - env) * entry;
+    oc.uTime.value = state.clock.elapsedTime;
+    oc.uShimmer.value = 0; // steady faint sea, no twinkle
+    oc.uGlobeness.value = globeness;
+    // ocean hover lens — the sea dots swell + part under the cursor like the land.
+    // The ocean doesn't scatter, so it only needs updating WHILE a hover is active
+    // (lens > 0); once it fades, reset the buffer to its rest layout exactly once.
+    if (oceanRef.current && globeness > 0.001 && lens > 0.001) {
+      for (let q = 0; q < OCEAN_COUNT; q++) {
+        const ix = q * 3;
+        const iy = ix + 1;
+        let mx = oceanBase[ix];
+        let my = oceanBase[iy];
+        let grow = 0;
+        const dx = mx - lcx;
+        const dy = my - lcy;
+        const cd2 = dx * dx + dy * dy;
+        if (cd2 < HOVER_R2) {
+          const cd = Math.sqrt(cd2) || 1e-4;
+          const f = 1 - cd / HOVER_RADIUS;
+          const ff = f * f;
+          grow = HOVER_GROW * ff * lens;
+          const spread = (HOVER_SPREAD * ff * lens) / cd;
+          mx += dx * spread;
+          my += dy * spread;
+        }
+        oceanSizes[q] = 1 + grow;
+        oceanPositions[ix] = mx;
+        oceanPositions[iy] = my;
+        oceanPositions[ix + 2] = oceanBase[ix + 2];
+      }
+      const og = oceanRef.current.geometry;
+      (og.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+      (og.attributes.aSize as THREE.BufferAttribute).needsUpdate = true;
+      oceanHovered.current = true;
+    } else if (oceanRef.current && oceanHovered.current) {
+      oceanPositions.set(oceanBase);
+      oceanSizes.fill(1);
+      const og = oceanRef.current.geometry;
+      (og.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+      (og.attributes.aSize as THREE.BufferAttribute).needsUpdate = true;
+      oceanHovered.current = false;
     }
 
-    // drive the custom material: base size (DPR + perspective attenuation, matching
-    // three's PointsMaterial formula so the look is unchanged), plus entry/mobile
-    // dimmed opacity. Base size nudged up a touch to keep the larger model from
-    // reading as too sparse.
+    // dense land fill — the continents. A FULL participant: it scatters with the
+    // transition and reacts to the hover lens, just like the morph cloud. Opacity
+    // gates on globeness (invisible off the globe) and entry, but NOT on (1 - env)
+    // so it stays lit while it bursts apart. The per-point loop only runs while
+    // it's actually moving (transition/entry/hover); on the settled idle globe it
+    // holds its rest layout (reset once) to avoid a needless 48k-point update.
+    const lf = landFillMaterial.uniforms;
+    lf.uSize.value = (dark ? 0.032 : 0.03) * state.gl.getPixelRatio() * (1 + 0.3 * globeness);
+    lf.uScale.value = state.size.height * 0.5;
+    lf.uOpacity.value = (dark ? 0.95 : 0.9) * globeness * entry * (mobile ? 0.6 : 1);
+    lf.uTime.value = state.clock.elapsedTime;
+    lf.uShimmer.value = animate ? 0.5 : 0;
+    lf.uGlobeness.value = globeness;
+    const lfMoving = globeness > 0.001 && (env > 0.001 || lens > 0.001 || entry < 0.999);
+    if (landFillRef.current && lfMoving) {
+      for (let q = 0; q < LANDFILL_COUNT; q++) {
+        const ix = q * 3;
+        const iy = ix + 1;
+        const iz = ix + 2;
+        let mx = landFillBase[ix];
+        let my = landFillBase[iy];
+        const mz = landFillBase[iz];
+        // hover lens (swell + part outward)
+        let grow = 0;
+        if (lens > 0.001) {
+          const dx = mx - lcx;
+          const dy = my - lcy;
+          const cd2 = dx * dx + dy * dy;
+          if (cd2 < HOVER_R2) {
+            const cd = Math.sqrt(cd2) || 1e-4;
+            const f = 1 - cd / HOVER_RADIUS;
+            const ff = f * f;
+            grow = HOVER_GROW * ff * lens;
+            const spread = (HOVER_SPREAD * ff * lens) / cd;
+            mx += dx * spread;
+            my += dy * spread;
+          }
+        }
+        landFillSizes[q] = 1 + grow;
+        // scatter blend, then entry blend — identical pipeline to the morph cloud
+        const ex = lerp(mx, landFillScatter[ix] * sx, env);
+        const ey = lerp(my, landFillScatter[iy] * sy, env);
+        const ez = lerp(mz, landFillScatter[iz] * sz, env);
+        landFillPositions[ix] = lerp(landFillScatter[ix] * sx, ex, entry);
+        landFillPositions[iy] = lerp(landFillScatter[iy] * sy, ey, entry);
+        landFillPositions[iz] = lerp(landFillScatter[iz] * sz, ez, entry);
+      }
+      const lg = landFillRef.current.geometry;
+      (lg.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+      (lg.attributes.aSize as THREE.BufferAttribute).needsUpdate = true;
+      landFillActive.current = true;
+    } else if (landFillRef.current && landFillActive.current) {
+      landFillPositions.set(landFillBase);
+      landFillSizes.fill(1);
+      const lg = landFillRef.current.geometry;
+      (lg.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+      (lg.attributes.aSize as THREE.BufferAttribute).needsUpdate = true;
+      landFillActive.current = false;
+    }
+
+    // drive the morph cloud's material. On the GLOBE its (sparse) land dots ease to
+    // the dense land-fill style — size → 0.032, color → globe color (uTintAmount),
+    // opacity, shimmer → 0.5 — so they blend into the dense fill rather than reading
+    // as a second, chunkier layer. uGlobeness drives the shared front/back fade.
     const mu = modelMaterial.uniforms;
-    mu.uSize.value = (dark ? 0.055 : 0.05) * state.gl.getPixelRatio();
+    const landBase = dark ? lerp(0.055, 0.032, globeness) : lerp(0.05, 0.03, globeness);
+    mu.uSize.value = landBase * state.gl.getPixelRatio() * (1 + 0.3 * globeness);
     mu.uScale.value = state.size.height * 0.5;
-    mu.uOpacity.value = (dark ? 0.95 : 0.85) * entry * (mobile ? 0.55 : 1);
+    mu.uOpacity.value =
+      lerp(dark ? 0.95 : 0.85, dark ? 0.95 : 0.9, globeness) *
+      entry *
+      (mobile ? lerp(0.55, 0.6, globeness) : 1);
     mu.uTime.value = state.clock.elapsedTime;
-    mu.uShimmer.value = animate ? 1 : 0;
+    mu.uShimmer.value = animate ? lerp(1, 0.5, globeness) : 0;
+    mu.uGlobeness.value = globeness;
+    mu.uTintAmount.value = globeness;
 
     // outer = horizontal dock + per-section scale (the hero </> is enlarged, all
     // else 1; the scale eases to 1 across the first gap so the spin shrinks the
@@ -1011,22 +1331,27 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
               blending={dark ? THREE.AdditiveBlending : THREE.NormalBlending}
             />
           </lineSegments>
-          {/* tiny sea dots filling the ocean of the world globe (opacity driven
-              per-frame by globeness — invisible on every other shape) */}
-          <points ref={oceanRef} frustumCulled={false}>
+          {/* sea dots filling the ocean of the world globe (opacity + front/back
+              fade + hover swell driven per-frame via the shared shader — invisible
+              on every other shape, and the far-hemisphere sea hides like the land) */}
+          <points ref={oceanRef} material={oceanMaterial} frustumCulled={false}>
             <bufferGeometry>
-              <bufferAttribute attach="attributes-position" args={[oceanPos, 3]} />
+              <bufferAttribute attach="attributes-position" args={[oceanPositions, 3]} />
+              <bufferAttribute attach="attributes-aColor" args={[oceanColors, 3]} />
+              <bufferAttribute attach="attributes-aSize" args={[oceanSizes, 1]} />
+              <bufferAttribute attach="attributes-aPhase" args={[oceanPhases, 1]} />
             </bufferGeometry>
-            <pointsMaterial
-              map={dot ?? undefined}
-              color={dark ? "#ffffff" : "#64748b"}
-              size={dark ? 0.02 : 0.018}
-              sizeAttenuation
-              transparent
-              opacity={0}
-              depthWrite={false}
-              blending={dark ? THREE.AdditiveBlending : THREE.NormalBlending}
-            />
+          </points>
+          {/* dense land fill — the continents, evenly packed (Fibonacci lattice).
+              Full participant: scatters with the transition and reacts to the hover
+              lens (positions/sizes animated in useFrame, opacity by globeness). */}
+          <points ref={landFillRef} material={landFillMaterial} frustumCulled={false}>
+            <bufferGeometry>
+              <bufferAttribute attach="attributes-position" args={[landFillPositions, 3]} />
+              <bufferAttribute attach="attributes-aColor" args={[landFillColors, 3]} />
+              <bufferAttribute attach="attributes-aSize" args={[landFillSizes, 1]} />
+              <bufferAttribute attach="attributes-aPhase" args={[landFillPhases, 1]} />
+            </bufferGeometry>
           </points>
         </group>
       </group>
