@@ -1,10 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useRef } from "react";
-import { Canvas, useFrame, type RootState } from "@react-three/fiber";
+import { Canvas, useFrame, useThree, type RootState } from "@react-three/fiber";
 import { useReducedMotion } from "framer-motion";
 import { useTheme } from "next-themes";
 import * as THREE from "three";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { MeshSurfaceSampler } from "three/examples/jsm/math/MeshSurfaceSampler.js";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 import { setModelTransitioning } from "@/components/three/model-phase";
 
@@ -15,10 +18,10 @@ import { setModelTransitioning } from "@/components/three/model-phase";
  * docks to alternating sides per section, and SCATTERS full-screen in the gaps
  * between sections before reassembling on the opposite side as the next shape:
  *
- *   </> → </> → gear → { } → ★ → ★ → globe
+ *   brain → brain → gear → { } → </> → </> → globe
  *
- * Gaps between two IDENTICAL shapes (Hero↔About </>, Projects↔Education ★) are
- * special: instead of scattering they spin a full 360° about the vertical Y
+ * Gaps between two IDENTICAL shapes (Hero↔About brain, Projects↔Education </>)
+ * are special: instead of scattering they spin a full 360° about the vertical Y
  * axis — a visible turn that lands cleanly. Mixed-shape gaps scatter as before.
  *
  * The form itself moves only SLIGHTLY (a gentle tilt); moving the cursor
@@ -34,12 +37,15 @@ import { setModelTransitioning } from "@/components/three/model-phase";
  * hero </> with stars.
  */
 
-// denser than the original 2400 so the world-globe continents read clearly (the
-// count is shared across every morph shape, which only makes the rest richer too)
-const POINT_COUNT = 3600;
+// Shared by every morph shape (one cloud morphs between them, so they all use the
+// same count). Bumped well past the original 2400 so the brain's gyri/sulci read
+// as real structure instead of a sparse scatter — which only makes the glyphs and
+// the globe morph cloud richer too. The per-frame morph/links loops are O(this);
+// 9000 is still trivial on the CPU.
+const POINT_COUNT = 9000;
 const STAR_COUNT = 3500;
 // white sea dots that fill the ocean between continents on the world globe —
-// denser than the land so the sea reads as a full surface, evenly distributed
+// denser than the land so the sea reads as a full surface, randomly scattered
 const OCEAN_COUNT = 6000;
 const LINKS_PER_POINT = 1;
 
@@ -53,11 +59,11 @@ const MODEL_SCALE = 1.35;
 // sits at z≈+GLOBE_RADIUS, which the cursor projection must account for.
 const GLOBE_RADIUS = 1.5 * MODEL_SCALE;
 
-// The hero </> is the page's headline mark, so it sits larger than the matching
-// About </> it morphs into. Applied as a group scale on section 0 only that eases
-// to 1 across the first gap — so the Y spin shrinks the big hero glyph into the
-// smaller docked About one. Every other model stays at 1.
-const HERO_SCALE = 1.3;
+// Per-section-0 scale: the hero (first) brain is enlarged as the page's headline
+// mark, easing to 1 across the first gap so the Hero→About spin shrinks it to the
+// docked About size. Trimming the stem freed the headroom to enlarge it again
+// without overflowing the viewport. Raise/lower to taste.
+const HERO_SCALE = 1.5;
 
 // Hover "lens": every point within HOVER_RADIUS (cloud-local units; the model
 // spans ~±2.7 after MODEL_SCALE) of the cursor swells to (1 + HOVER_GROW)× its
@@ -78,9 +84,16 @@ const SHIMMER_MIN = 0.35;
 const SHIMMER_FREQ = 2.0;
 
 // Per-section shape + side. order.length must match the number of <section>s.
-// Adjacent IDENTICAL shapes (Hero/About </>, Projects/Education ★) spin about
+// Adjacent IDENTICAL shapes (Hero/About brain, Projects/Education </>) spin about
 // the Y axis between sections instead of scattering — see rollY / spinGap below.
-const ORDER = ["brackets", "brackets", "gear", "braces", "star", "star", "globe"] as const;
+const ORDER = ["brain", "brain", "gear", "braces", "brackets", "brackets", "globe"] as const;
+
+// The Hero/About brain is sampled from a real anatomical mesh (/models/brain.glb);
+// until it loads (or if the fetch fails) a procedural silhouette stands in. The
+// mesh is normalized so its LARGEST dimension == BRAIN_SPAN; kept smaller than the
+// glyphs' 4.0·MODEL_SCALE span because the brain fills its whole silhouette (the
+// glyphs don't) — an equal span overflowed the viewport on the hero.
+const BRAIN_SPAN = 2.6 * MODEL_SCALE;
 // even index → model docks RIGHT (+1), odd → LEFT (-1). Content sits opposite.
 const sideSign = (i: number) => (i % 2 === 0 ? 1 : -1);
 // How far the model docks from center, as a fraction of viewport width. The
@@ -221,32 +234,22 @@ function drawWorldMapFallback(ctx: CanvasRenderingContext2D, W: number, H: numbe
   ctx.fillRect(0, P(0, -66)[1], W, H - P(0, -66)[1]);
 }
 
-// Fibonacci-lattice sizes for the EVEN globe sampling. A lattice of this many
-// points (uniform spacing on the sphere) is classified against the land mask and
-// the wanted points are kept, then evenly decimated to the exact buffer size.
-// GLOBE_LATTICE feeds the (sparse) morph-cloud globe + the ocean; the dense land
-// fill uses its own, much larger lattice below.
-const GLOBE_LATTICE = 16000;
 // Dense LAND FILL — the morph cloud's land is only POINT_COUNT dots (far too
-// sparse), so the continents are filled by a separate dense cloud sampled from a
-// large Fibonacci lattice (uniform spacing → no empty patches). Keep the kept-land
-// count comfortably below LANDFILL_LATTICE's land total so decimation is ~1:1.
-const LANDFILL_LATTICE = 170000;
+// sparse), so the continents are filled by a separate dense cloud of randomly
+// scattered land dots (see sampleGlobeRandom).
 const LANDFILL_COUNT = 48000;
 
 /**
- * Even globe sampler. Lays a Fibonacci (golden-angle) lattice over the sphere —
- * uniform spacing, NO randomness — classifies each point against the Natural
- * Earth land mask via `keep`, then EVENLY decimates the kept points to exactly
- * `target`. So the dots are regularly spaced over their region instead of
- * randomly clustered with gaps. Positions are rotated so India faces the camera
- * (+z) and pitched by GLOBE_TILT_DEG, matching every globe layer. `latticeN` must
- * be large enough that the kept set ≥ target (else points repeat at the tail).
+ * Random globe sampler. Rejection-samples uniform-random points on the sphere
+ * (equal-area: z uniform in [-1,1], longitude uniform) and keeps those that pass
+ * `keep` against the Natural Earth land mask, until `target` points are gathered.
+ * The scatter is deliberately RANDOM — natural clumps and gaps, like a starfield —
+ * rather than a regular lattice. Positions are rotated so India faces the camera
+ * (+z) and pitched by GLOBE_TILT_DEG, matching every globe layer.
  */
-function sampleGlobeLattice(
+function sampleGlobeRandom(
   target: number,
   radius: number,
-  latticeN: number,
   keep: (isLand: (lonDeg: number, latDeg: number) => boolean, lonDeg: number, latDeg: number) => boolean
 ): Float32Array {
   const out = new Float32Array(target * 3);
@@ -270,56 +273,176 @@ function sampleGlobeLattice(
     py = py < 0 ? 0 : py >= H ? H - 1 : py;
     return data[(py * W + px) * 4 + 3] > 100;
   };
-  // collect kept lattice points as (lat, lon) in radians
-  const golden = Math.PI * (3 - Math.sqrt(5));
-  const keptLat: number[] = [];
-  const keptLon: number[] = [];
-  for (let i = 0; i < latticeN; i++) {
-    const y = 1 - ((i + 0.5) / latticeN) * 2; // +1 → -1, equal-area in y
-    const lat = Math.asin(y < -1 ? -1 : y > 1 ? 1 : y);
-    let lon = (golden * i) % (2 * Math.PI);
-    if (lon > Math.PI) lon -= 2 * Math.PI; // [-π, π]
-    if (keep(isLand, (lon * 180) / Math.PI, (lat * 180) / Math.PI)) {
-      keptLat.push(lat);
-      keptLon.push(lon);
-    }
-  }
-  const L = keptLat.length;
-  if (L === 0) return out;
   const lon0 = (INDIA_LON * Math.PI) / 180;
   const tilt = (GLOBE_TILT_DEG * Math.PI) / 180;
   const ct = Math.cos(tilt);
   const st = Math.sin(tilt);
-  for (let j = 0; j < target; j++) {
-    const idx = Math.min(L - 1, Math.floor((j * L) / target)); // even decimation
-    const lat = keptLat[idx];
-    const lam = keptLon[idx] - lon0; // longitude relative to India (front = +z)
+  let filled = 0;
+  // cap tries so a degenerate (empty) mask can't spin forever; normally the loop
+  // exits far sooner (land ≈ 3-4 tries/point, ocean ≈ 1.5).
+  const maxTries = target * 80 + 100000;
+  for (let t = 0; filled < target && t < maxTries; t++) {
+    const z = Math.random() * 2 - 1; // equal-area latitude
+    const lat = Math.asin(z);
+    let lon = Math.random() * 2 * Math.PI;
+    if (lon > Math.PI) lon -= 2 * Math.PI; // [-π, π]
+    if (!keep(isLand, (lon * 180) / Math.PI, (lat * 180) / Math.PI)) continue;
+    const lam = lon - lon0; // longitude relative to India (front = +z)
     const cl = Math.cos(lat);
     const x0 = radius * cl * Math.sin(lam);
     const y0 = radius * Math.sin(lat);
     const z0 = radius * cl * Math.cos(lam);
-    out[j * 3] = x0;
-    out[j * 3 + 1] = y0 * ct - z0 * st; // pitch about X (Asia toward the camera)
-    out[j * 3 + 2] = y0 * st + z0 * ct;
+    out[filled * 3] = x0;
+    out[filled * 3 + 1] = y0 * ct - z0 * st; // pitch about X (Asia toward the camera)
+    out[filled * 3 + 2] = y0 * st + z0 * ct;
+    filled++;
   }
   return out;
 }
 
-/** World globe — land dots, evenly spaced over every landmass. */
+/** World globe — random land dots scattered over every landmass. */
 function makeWorldGlobe(n: number, radius: number): Float32Array {
-  return sampleGlobeLattice(n, radius, GLOBE_LATTICE, (isLand, lon, lat) => isLand(lon, lat));
+  return sampleGlobeRandom(n, radius, (isLand, lon, lat) => isLand(lon, lat));
 }
 
-/** Dense land fill — the SAME land sampling, but from a much denser lattice so the
- *  continents are packed evenly with no empty patches. A separate cloud; the sparse
- *  POINT_COUNT morph globe stays only to drive the transition. */
+/** Dense land fill — the SAME random land sampling at a much higher count so the
+ *  continents read as filled. A separate cloud; the sparse POINT_COUNT morph globe
+ *  stays only to drive the transition. */
 function makeGlobeLandFill(n: number, radius: number): Float32Array {
-  return sampleGlobeLattice(n, radius, LANDFILL_LATTICE, (isLand, lon, lat) => isLand(lon, lat));
+  return sampleGlobeRandom(n, radius, (isLand, lon, lat) => isLand(lon, lat));
 }
 
-/** Ocean glints — evenly spaced over the sea (the land lattice's complement). */
+/** Ocean glints — random points scattered over the sea (the land's complement). */
 function makeGlobeOcean(n: number, radius: number): Float32Array {
-  return sampleGlobeLattice(n, radius, GLOBE_LATTICE, (isLand, lon, lat) => !isLand(lon, lat));
+  return sampleGlobeRandom(n, radius, (isLand, lon, lat) => !isLand(lon, lat));
+}
+
+/**
+ * Trim the thin brainstem/spinal stub off a non-indexed triangle soup so the
+ * cerebrum — not the stem — dominates. The stem stretches the model's longest
+ * axis well past the brain bulk; since makeBrainFromMesh scales by the largest
+ * extent, leaving it in shrinks the actual brain. We bin vertices along the
+ * longest axis, measure each band's cross-section (its extent in the other two
+ * axes), then keep only the contiguous band — grown outward from the widest
+ * slice — whose cross-section stays a healthy fraction of the widest one. The
+ * stem's tiny section falls below that cutoff and is dropped. A stemless or
+ * gently-tapering model keeps ~everything (effectively a no-op).
+ */
+function trimStem(pos: Float32Array): Float32Array {
+  const verts = pos.length / 3;
+  if (verts < 30) return pos;
+  let mnx = Infinity, mny = Infinity, mnz = Infinity;
+  let mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+  for (let i = 0; i < pos.length; i += 3) {
+    const x = pos[i], y = pos[i + 1], z = pos[i + 2];
+    if (x < mnx) mnx = x; if (x > mxx) mxx = x;
+    if (y < mny) mny = y; if (y > mxy) mxy = y;
+    if (z < mnz) mnz = z; if (z > mxz) mxz = z;
+  }
+  const sx = mxx - mnx, sy = mxy - mny, sz = mxz - mnz;
+  // ax = longest axis (the one the stem extends along); ca/cb = the cross axes
+  const ax = sy >= sx && sy >= sz ? 1 : sx >= sz ? 0 : 2;
+  const ca = ax === 0 ? 1 : 0;
+  const cb = ax === 2 ? 1 : 2;
+  const min = ax === 0 ? mnx : ax === 1 ? mny : mnz;
+  const len = ax === 0 ? sx : ax === 1 ? sy : sz;
+  if (len <= 0) return pos;
+
+  const BINS = 48;
+  const caLo = new Float32Array(BINS).fill(Infinity);
+  const caHi = new Float32Array(BINS).fill(-Infinity);
+  const cbLo = new Float32Array(BINS).fill(Infinity);
+  const cbHi = new Float32Array(BINS).fill(-Infinity);
+  for (let i = 0; i < pos.length; i += 3) {
+    let b = (((pos[i + ax] - min) / len) * BINS) | 0;
+    if (b < 0) b = 0; else if (b >= BINS) b = BINS - 1;
+    const va = pos[i + ca], vb = pos[i + cb];
+    if (va < caLo[b]) caLo[b] = va; if (va > caHi[b]) caHi[b] = va;
+    if (vb < cbLo[b]) cbLo[b] = vb; if (vb > cbHi[b]) cbHi[b] = vb;
+  }
+  const width = new Float32Array(BINS);
+  let maxW = 0, peak = 0;
+  for (let b = 0; b < BINS; b++) {
+    const wa = caHi[b] > caLo[b] ? caHi[b] - caLo[b] : 0;
+    const wb = cbHi[b] > cbLo[b] ? cbHi[b] - cbLo[b] : 0;
+    const w = wa > wb ? wa : wb;
+    width[b] = w;
+    if (w > maxW) { maxW = w; peak = b; }
+  }
+  if (maxW <= 0) return pos;
+  const thr = 0.32 * maxW;
+  let lo = peak, hi = peak;
+  while (lo - 1 >= 0 && width[lo - 1] >= thr) lo--;
+  while (hi + 1 < BINS && width[hi + 1] >= thr) hi++;
+  if (lo === 0 && hi === BINS - 1) return pos; // nothing thin to trim
+
+  const keepMin = min + (lo / BINS) * len;
+  const keepMax = min + ((hi + 1) / BINS) * len;
+  const kept: number[] = [];
+  for (let i = 0; i < pos.length; i += 9) {
+    const c = (pos[i + ax] + pos[i + 3 + ax] + pos[i + 6 + ax]) / 3; // triangle centroid
+    if (c >= keepMin && c <= keepMax) {
+      for (let j = 0; j < 9; j++) kept.push(pos[i + j]);
+    }
+  }
+  return kept.length >= 90 ? Float32Array.from(kept) : pos;
+}
+
+/**
+ * Sample a Float32 point cloud off the SURFACE of a loaded 3D mesh (the brain
+ * GLB). Every mesh in the scene is flattened to world space, reduced to its
+ * position attribute, de-indexed and merged into one geometry, then area-weighted
+ * surface sampling (MeshSurfaceSampler) draws `n` evenly-distributed points — so
+ * the real gyri/sulci come for free from the geometry. The thin brainstem is
+ * trimmed first (see trimStem) so the cerebrum fills the frame; the result is then
+ * recentred on its bounding box and uniformly scaled so its largest dimension ==
+ * `span`, to match the glyph shapes. Returns zeros if the scene has no meshes.
+ */
+function makeBrainFromMesh(root: THREE.Object3D, n: number, span: number): Float32Array {
+  const out = new Float32Array(n * 3);
+  root.updateMatrixWorld(true);
+  const geoms: THREE.BufferGeometry[] = [];
+  root.traverse((o) => {
+    if (!(o instanceof THREE.Mesh)) return;
+    const src = o.geometry.index ? o.geometry.toNonIndexed() : o.geometry.clone();
+    const pos = src.getAttribute("position");
+    if (!pos) return;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", pos.clone());
+    g.applyMatrix4(o.matrixWorld); // bake the node transform into the vertices
+    geoms.push(g);
+  });
+  if (geoms.length === 0) return out;
+  const merged = geoms.length === 1 ? geoms[0] : mergeGeometries(geoms, false);
+  if (!merged) return out;
+
+  // trim the thin brainstem so the cerebrum (not the stem) fills `span` below
+  const mergedPos = merged.getAttribute("position");
+  if (!mergedPos) return out;
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute("position", new THREE.BufferAttribute(trimStem(mergedPos.array as Float32Array), 3));
+
+  // normalize: center on the bounding-box midpoint, scale so the largest extent == span
+  geom.computeBoundingBox();
+  const bb = geom.boundingBox;
+  if (!bb) return out;
+  const mid = new THREE.Vector3();
+  const size = new THREE.Vector3();
+  bb.getCenter(mid);
+  bb.getSize(size);
+  const ext = Math.max(size.x, size.y, size.z) || 1;
+  geom.translate(-mid.x, -mid.y, -mid.z);
+  geom.scale(span / ext, span / ext, span / ext);
+
+  const sampler = new MeshSurfaceSampler(new THREE.Mesh(geom)).build();
+  const p = new THREE.Vector3();
+  for (let i = 0; i < n; i++) {
+    sampler.sample(p);
+    out[i * 3] = p.x;
+    out[i * 3 + 1] = p.y;
+    out[i * 3 + 2] = p.z;
+  }
+  return out;
 }
 
 /**
@@ -473,25 +596,26 @@ function drawGear(ctx: CanvasRenderingContext2D, S: number) {
   ctx.globalCompositeOperation = "source-over";
 }
 
-/** Five-point star — a clean filled polygon (outer/inner radii), pointing up.
- *  Simple and crisp as a point cloud, distinct from the code glyphs. */
-function drawStar(ctx: CanvasRenderingContext2D, S: number) {
+/** Procedural brain silhouette — the FALLBACK only. The real Hero/About brain is
+ *  sampled from /models/brain.glb (see makeBrainFromMesh); this stands in until the
+ *  mesh loads, or permanently if the fetch fails (mirrors the world-map fallback).
+ *  A lobed blob (two hemispheres + a cerebellum bump + a short stem); sampled with
+ *  a non-zero `wrinkle` so the inflated body gets gyri-like surface bumpiness. */
+function drawBrain(ctx: CanvasRenderingContext2D, S: number) {
   const cx = 0.5 * S;
-  const cy = 0.5 * S;
-  const rOuter = 0.31 * S;
-  const rInner = 0.135 * S;
-  const tips = 5;
-  ctx.beginPath();
-  for (let i = 0; i < tips * 2; i++) {
-    const r = i % 2 === 0 ? rOuter : rInner;
-    const ang = -Math.PI / 2 + (i * Math.PI) / tips; // first tip at the top
-    const x = cx + Math.cos(ang) * r;
-    const y = cy + Math.sin(ang) * r;
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  }
-  ctx.closePath();
-  ctx.fill();
+  const cy = 0.47 * S;
+  const rx = 0.34 * S;
+  const ry = 0.27 * S;
+  const blob = (x: number, y: number, ax: number, ay: number) => {
+    ctx.beginPath();
+    ctx.ellipse(x, y, ax, ay, 0, 0, Math.PI * 2);
+    ctx.fill();
+  };
+  blob(cx, cy, rx, ry); // main cerebrum
+  blob(cx - rx * 0.45, cy - ry * 0.15, rx * 0.55, ry * 0.8); // left hemisphere bulge
+  blob(cx + rx * 0.45, cy - ry * 0.15, rx * 0.55, ry * 0.8); // right hemisphere bulge
+  blob(cx + rx * 0.5, cy + ry * 0.65, rx * 0.3, ry * 0.38); // cerebellum, lower back
+  blob(cx + rx * 0.12, cy + ry * 1.0, rx * 0.1, ry * 0.32); // brainstem
 }
 
 // ---------------------------------------------------------------- sprite
@@ -522,9 +646,12 @@ function makeDotTexture(): THREE.Texture | null {
 }
 
 // ---------------------------------------------------------------- palette
-// The bright globe particle color, used by the dense land-fill cloud and by the
-// land morph cloud's globe tint so the whole globe reads as one particle style.
-const GLOBE_DOT_COLOR = (dark: boolean) => (dark ? "#f3f1ff" : "#3a2d8f");
+// The globe particle color, used by the dense land-fill cloud and by the land
+// morph cloud's globe tint so the whole globe reads as one particle style. Uses the
+// orchid violet from the palette below (hue ~269°), NOT the brand #8052ff: the brand
+// is blue-dominant (B=255), so rendered bright + dense the globe read as blue. Orchid
+// keeps the globe clearly PURPLE, matching how the faint node-link lines read.
+const GLOBE_DOT_COLOR = (dark: boolean) => (dark ? "#b46cff" : "#8e4fe0");
 
 function buildColors(n: number, dark: boolean): Float32Array {
   // Shades of violet around the Plum Voltage brand (#8052ff), keyed to the
@@ -642,12 +769,23 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
 
   const seg = useRef(0); // target segment (i + f) from scroll
   const segSmooth = useRef(0);
-  const centers = useRef<number[]>([]);
+  // Each content section's document-space top & bottom. The morph is keyed off the
+  // empty GAPS between these boxes, not the section centers, so transitions run
+  // only while content is offscreen (see onScroll below).
+  const bounds = useRef<{ top: number; bottom: number }[]>([]);
   const pointer = useRef({ x: 0, y: 0, active: false });
   const hover = useRef(0);
   // eased cursor yaw, kept apart from inner.rotation.y so the first-gap Y spin
   // (rollY) can be added on top without the easing dragging it back down
   const tiltY = useRef(0);
+  // the brain points sampled from the real mesh, set once the GLB resolves. The
+  // hero shows the brain at load, so rather than a hard swap (a visible snap) the
+  // useFrame eases shapes.brain toward this target, then clears it. null = nothing
+  // pending (still on the procedural fallback, or already converged).
+  const brainTarget = useRef<Float32Array | null>(null);
+  // force a render after the async brain load lands while in reduced-motion
+  // ("demand" frameloop only renders on request)
+  const invalidate = useThree((s) => s.invalidate);
   // reused each frame to unproject the cursor into the cloud's local space
   const cursorLocal = useMemo(() => new THREE.Vector3(), []);
 
@@ -657,7 +795,10 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
       brackets: sampleSilhouette(drawBrackets, POINT_COUNT, 4.0 * MODEL_SCALE, 0.5 * MODEL_SCALE),
       gear: sampleSilhouette(drawGear, POINT_COUNT, 4.0 * MODEL_SCALE, 0.7 * MODEL_SCALE),
       braces: sampleSilhouette(drawBraces, POINT_COUNT, 4.0 * MODEL_SCALE, 0.5 * MODEL_SCALE),
-      star: sampleSilhouette(drawStar, POINT_COUNT, 4.0 * MODEL_SCALE, 0.6 * MODEL_SCALE),
+      // Hero/About brain — a procedural silhouette with gyri-like wrinkle, used
+      // only until /models/brain.glb loads and re-samples this buffer in place
+      // (see the GLTF effect + the eased swap in useFrame).
+      brain: sampleSilhouette(drawBrain, POINT_COUNT, BRAIN_SPAN, 0.6 * MODEL_SCALE, 0.35 * MODEL_SCALE),
       // smaller than the other shapes so the whole India-facing sphere fits in
       // the open space beside the Contact cards (the eastern/Asia side would
       // otherwise run off the right edge when docked).
@@ -672,8 +813,8 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     return s as Record<(typeof ORDER)[number], Float32Array>;
   }, []);
 
-  // live render buffer + smoothed positions, seeded at the hero </> brackets
-  const positions = useMemo(() => Float32Array.from(shapes.brackets), [shapes]);
+  // live render buffer + smoothed positions, seeded at the hero brain
+  const positions = useMemo(() => Float32Array.from(shapes.brain), [shapes]);
   const colors = useMemo(() => buildColors(POINT_COUNT, dark), [dark]);
 
   // sea dots on the same sphere/radius as the world globe (not centered, matching
@@ -684,7 +825,9 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
   const oceanBase = useMemo(() => makeGlobeOcean(OCEAN_COUNT, GLOBE_RADIUS), []);
   const oceanPositions = useMemo(() => Float32Array.from(oceanBase), [oceanBase]);
   const oceanColors = useMemo(() => {
-    const c = new THREE.Color(dark ? "#ffffff" : "#64748b");
+    // orchid violet — same as the land fill / GLOBE_DOT_COLOR — so the sea reads as
+    // part of the same purple globe (was white, then briefly the blue-leaning brand)
+    const c = new THREE.Color(dark ? "#b46cff" : "#8e4fe0");
     const a = new Float32Array(OCEAN_COUNT * 3);
     for (let i = 0; i < OCEAN_COUNT; i++) {
       a[i * 3] = c.r;
@@ -702,8 +845,8 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
   // shader's aPhase attribute without a per-point twinkle.
   const oceanPhases = useMemo(() => new Float32Array(OCEAN_COUNT), []);
 
-  // Dense land fill — the continents, evenly packed (Fibonacci lattice). A FULL
-  // participant like the morph cloud: it scatters with the transition and reacts
+  // Dense land fill — the continents, randomly scattered (see sampleGlobeRandom). A
+  // FULL participant like the morph cloud: it scatters with the transition and reacts
   // to the hover lens (see useFrame), so it needs a live buffer + scatter field +
   // per-point sizes. Bright globe color, driven in useFrame.
   const landFillBase = useMemo(() => makeGlobeLandFill(LANDFILL_COUNT, GLOBE_RADIUS), []);
@@ -774,6 +917,36 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
       cancelled = true;
     };
   }, [shapes, oceanBase, oceanPositions, landFillBase, landFillPositions]);
+
+  // Load the real brain mesh and re-sample shapes.brain off its surface. Like the
+  // coastline fetch above, the procedural silhouette stands in until this resolves
+  // (and stays if it fails). The brain is the HERO shape, on screen at load, so a
+  // hard buffer swap would snap — instead store the sampled cloud as a target that
+  // useFrame eases shapes.brain toward. In reduced motion (frameloop "demand",
+  // useFrame idle) set it directly and request a single render.
+  useEffect(() => {
+    let cancelled = false;
+    new GLTFLoader()
+      .loadAsync("/models/brain.glb")
+      .then((gltf) => {
+        if (cancelled) return;
+        const pts = makeBrainFromMesh(gltf.scene, POINT_COUNT, BRAIN_SPAN);
+        if (pts.length === 0) return; // no meshes — keep the fallback
+        centerY(pts);
+        if (animate) {
+          brainTarget.current = pts;
+        } else {
+          shapes.brain.set(pts);
+          invalidate();
+        }
+      })
+      .catch(() => {
+        /* keep the procedural fallback brain */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [shapes, animate, invalidate]);
 
   // soft round sprite shared by both clouds (clips the default square points)
   const dot = useMemo(makeDotTexture, []);
@@ -917,51 +1090,83 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     if (!animate || typeof window === "undefined") return;
     const ids = ["top", "about", "skills", "experience", "projects", "education", "contact"];
     const measure = () => {
-      const cs: number[] = [];
+      const bs: { top: number; bottom: number }[] = [];
       for (const id of ids) {
         const el = document.getElementById(id);
         if (el) {
           const r = el.getBoundingClientRect();
-          cs.push(r.top + window.scrollY + r.height / 2);
+          const top = r.top + window.scrollY;
+          bs.push({ top, bottom: top + r.height });
         }
       }
-      centers.current = cs;
+      bounds.current = bs;
     };
+    // Map scroll position → seg ∈ [0, last]. Integer part = the section currently
+    // filling the viewport (held shape); fractional part = morph progress. The
+    // cloud holds its shape while content is centered, then morphs/scatters/spins
+    // as the viewport crosses the empty gap between two sections.
     const onScroll = () => {
-      const cs = centers.current;
-      const vc = window.scrollY + window.innerHeight / 2;
-      if (cs.length < 2) {
+      const bs = bounds.current;
+      const last = bs.length - 1;
+      if (last < 1) {
         seg.current = 0;
         return;
       }
-      if (vc <= cs[0]) seg.current = 0;
-      else if (vc >= cs[cs.length - 1]) seg.current = cs.length - 1;
-      else {
-        for (let k = 0; k < cs.length - 1; k++) {
-          if (vc >= cs[k] && vc < cs[k + 1]) {
-            seg.current = k + (vc - cs[k]) / (cs[k + 1] - cs[k]);
-            break;
-          }
-        }
+      const y = window.scrollY;
+      const vh = window.innerHeight;
+      // How far the morph reaches OUTSIDE the fully-empty gap, into the tail of
+      // the outgoing section and the head of the incoming one. vh/2 → the morph
+      // starts when the outgoing content is half a screen from leaving and ends
+      // when the incoming content is half a screen into view: span == gapHeight
+      // (a full-viewport scrub, smooth), and the vh terms cancel so the scrub
+      // distance is stable across mobile address-bar height changes.
+      const lead = vh * 0.5;
+      if (y <= bs[0].bottom - lead) {
+        seg.current = 0; // hero still in view — hold shape 0
+        return;
       }
+      if (y >= bs[last].top - vh + lead) {
+        seg.current = last; // last section in view — hold final shape
+        return;
+      }
+      for (let k = 0; k < last; k++) {
+        const gapStart = bs[k].bottom - lead; // outgoing section half a screen from leaving
+        const gapEnd = bs[k + 1].top - vh + lead; // incoming section half a screen into view
+        if (y < gapStart) {
+          seg.current = k; // section k hold zone
+          return;
+        }
+        if (y <= gapEnd) {
+          // scrubbing the morph from shape k to shape k+1
+          const span = gapEnd - gapStart;
+          seg.current = k + (span > 0 ? clamp01((y - gapStart) / span) : 1);
+          return;
+        }
+        // else: past gap k — section k+1 now overlaps; resolved as its hold next loop
+      }
+      seg.current = last;
     };
     const onPointer = (e: PointerEvent) => {
       pointer.current.x = (e.clientX / window.innerWidth) * 2 - 1;
       pointer.current.y = -((e.clientY / window.innerHeight) * 2 - 1);
       pointer.current.active = true;
     };
+    // re-measure AND re-resolve the segment on resize: section box tops/bottoms
+    // and the viewport height both move (incl. mobile address-bar show/hide), so
+    // seg must update without waiting for the next scroll event.
+    const onResize = () => { measure(); onScroll(); };
     measure();
     onScroll();
     const t1 = window.setTimeout(measure, 400);
     const t2 = window.setTimeout(() => { measure(); onScroll(); }, 1200);
     window.addEventListener("scroll", onScroll, { passive: true });
-    window.addEventListener("resize", measure);
+    window.addEventListener("resize", onResize);
     window.addEventListener("pointermove", onPointer, { passive: true });
     return () => {
       window.clearTimeout(t1);
       window.clearTimeout(t2);
       window.removeEventListener("scroll", onScroll);
-      window.removeEventListener("resize", measure);
+      window.removeEventListener("resize", onResize);
       window.removeEventListener("pointermove", onPointer);
     };
   }, [animate]);
@@ -970,12 +1175,37 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     if (!pointsRef.current) return;
     const k = Math.min(1, delta * 5);
 
+    // ease the brain SOURCE buffer from the procedural fallback into the real
+    // sampled-mesh cloud once the GLB resolves. The per-frame morph reads
+    // shapes.brain directly (a = shapes[ORDER[i]]), so easing the source here
+    // morphs the on-screen hero smoothly instead of snapping. Clears the target
+    // once converged so this loop stops running.
+    if (brainTarget.current) {
+      const t = brainTarget.current;
+      const src = shapes.brain;
+      const e = Math.min(1, delta * 2);
+      let maxd = 0;
+      for (let j = 0; j < src.length; j++) {
+        const d = t[j] - src[j];
+        src[j] += d * e;
+        const ad = d < 0 ? -d : d;
+        if (ad > maxd) maxd = ad;
+      }
+      if (maxd < 0.002) {
+        src.set(t);
+        brainTarget.current = null;
+      }
+    }
+
     // entry: assemble from the scatter field over ~1.6s
     const entry = animate ? easeOutCubic(clamp01(state.clock.elapsedTime / 1.6)) : 1;
 
-    // smooth the scroll segment — a gentler factor than `k` so the cloud eases
-    // between shapes over more scroll distance instead of snapping
-    const segK = Math.min(1, delta * 2.2);
+    // smooth the scroll segment. The morph now lives inside a ~1-viewport gap, so
+    // a laggy follow would let it bleed past the gap into readable content; keep
+    // the ease tight (Lenis already smooths the raw scroll) but non-zero to absorb
+    // velocity spikes / resize re-measures. Raise toward *12 if bleed, lower to *6
+    // if it snaps.
+    const segK = Math.min(1, delta * 8);
     segSmooth.current += (seg.current - segSmooth.current) * segK;
     const last = ORDER.length - 1;
     let i = Math.floor(segSmooth.current);
@@ -990,8 +1220,8 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     const a = shapes[ORDER[i]];
     const b = shapes[ORDER[next]];
     const mf = easeInOut(tt);
-    // A gap between two IDENTICAL adjacent shapes (Hero↔About </>, Projects↔
-    // Education brain) spins about the vertical Y axis instead of scattering: the
+    // A gap between two IDENTICAL adjacent shapes (Hero↔About brain, Projects↔
+    // Education </>) spins about the vertical Y axis instead of scattering: the
     // morph is a no-op there, so a clean turn reads better than a dissolve.
     // Mixed-shape gaps scatter as before (env drives the full-screen spread).
     const spinGap = ORDER[i] === ORDER[next];
@@ -1249,9 +1479,8 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     mu.uGlobeness.value = globeness;
     mu.uTintAmount.value = globeness;
 
-    // outer = horizontal dock + per-section scale (the hero </> is enlarged, all
-    // else 1; the scale eases to 1 across the first gap so the spin shrinks the
-    // big hero glyph into the smaller docked About one). NO auto-rotation / bob.
+    // outer = horizontal dock + per-section scale (HERO_SCALE on section 0, all
+    // else 1; eases to 1 across the first gap). NO auto-rotation / bob.
     if (outer.current) {
       outer.current.position.x = dock * (1 - env) * entry;
       outer.current.position.y = 0;
@@ -1342,7 +1571,7 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
               <bufferAttribute attach="attributes-aPhase" args={[oceanPhases, 1]} />
             </bufferGeometry>
           </points>
-          {/* dense land fill — the continents, evenly packed (Fibonacci lattice).
+          {/* dense land fill — the continents, randomly scattered (sampleGlobeRandom).
               Full participant: scatters with the transition and reacts to the hover
               lens (positions/sizes animated in useFrame, opacity by globeness). */}
           <points ref={landFillRef} material={landFillMaterial} frustumCulled={false}>

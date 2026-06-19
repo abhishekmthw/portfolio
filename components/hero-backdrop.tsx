@@ -27,7 +27,7 @@ const ParticleField = dynamic(() => import("@/components/three/particle-field"),
 /**
  * ConstellationBackdrop — a FIXED, page-spanning layer behind all content. The
  * particle field reads global scroll progress, so it persists across every
- * section and morphs brain → bulb → globe as the visitor scrolls the page.
+ * section and morphs brain → gear → { } → </> → globe as the visitor scrolls.
  *
  * Mount once at the page root (behind <main/>). A soft radial vignette keeps
  * copy legible where the field is densest, without breaking the pure void.
