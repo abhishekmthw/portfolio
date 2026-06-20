@@ -79,6 +79,10 @@ const OCEAN_COUNT = 6000;
 // cloud, sampled off the same brain mesh, is layered onto the Hero/About brain
 // only (the way LANDFILL_COUNT densifies the globe). Invisible on every other shape.
 const BRAINFILL_COUNT = 30000;
+// Same idea for the Experience DNA double helix: the shared morph cloud is too sparse
+// to read as solid strands, so a separate high-count cloud sampling the same helix
+// is layered on to make it bold and solid. Invisible on every other shape.
+const DNAFILL_COUNT = 30000;
 
 // Overall size of the morphing model. Bump this to scale every shape together;
 // the starfield and the full-screen scatter spread are deliberately left
@@ -115,10 +119,22 @@ const HOVER_GROW = 1.9; // peak size boost at the cursor (×(1+this)); smooth fa
 const SHIMMER_MIN = 0.35;
 const SHIMMER_FREQ = 2.0;
 
+// Load-time entry choreography (seconds). The cloud appears SHATTERED — all particles
+// dispersed across the viewport — holds briefly so the burst reads, then REJOINS into
+// the brain. The rejoin is deliberately held back until the real /models/brain.glb mesh
+// is ready, so the particles reassemble straight into the actual brain instead of first
+// forming the procedural stand-in and then visibly morphing into the mesh. ENTRY_FADE
+// ramps opacity fast so the shatter is visible; ENTRY_MAX_WAIT starts the rejoin anyway
+// if the mesh is slow or fails to load (so a stalled asset can't freeze the intro).
+const ENTRY_FADE = 0.4; // opacity ramp-in so the dispersed shatter is visible
+const ENTRY_MIN_HOLD = 0.55; // minimum time held shattered before the rejoin begins
+const ENTRY_MAX_WAIT = 2.2; // fallback: rejoin even if the brain mesh isn't ready yet
+const ENTRY_DUR = 1.6; // rejoin (assembly) duration
+
 // Per-section shape + side. order.length must match the number of <section>s.
 // Adjacent IDENTICAL shapes (Hero/About brain, Projects/Education </>) spin about
 // the Y axis between sections instead of scattering — see rollY / spinGap below.
-const ORDER = ["brain", "brain", "cloud", "dataflow", "brackets", "brackets", "globe"] as const;
+const ORDER = ["brain", "brain", "cloud", "dna", "brackets", "brackets", "globe"] as const;
 
 // Per-section target Y-rotation (radians), interpolated by morph progress in
 // useFrame. A gap between two IDENTICAL shapes turns a VISIBLE amount: the brain
@@ -151,6 +167,16 @@ const CLOUD_SPAN = 2.6 * MODEL_SCALE;
 // orthogonal connector elbows on the cloud's edge.
 const CLOUD_HALF_W = CLOUD_SPAN * 0.5;
 const CLOUD_HALF_H = CLOUD_SPAN * 0.22;
+// DNA double helix (Experience stage) — sampled from /models/dna.glb when present
+// (a realistic B-form helix: 10 bp/turn, 3.38Å rise, major/minor groove asymmetry),
+// else the procedural makeDNA fallback. Normalized so its LARGEST extent (the vertical
+// helix height) == DNA_SPAN. Taller than the other shapes so the slim, true-to-life
+// helix still reads at a comparable presence.
+const DNA_SPAN = 3.0 * MODEL_SCALE;
+// The DNA helix is the ONLY model that auto-spins: it rotates continuously about its
+// vertical (+y) helix axis whenever it's on screen (gated by dnaness in useFrame), at
+// this angular speed (rad/s). Every other shape stays put apart from the cursor tilt.
+const DNA_SPIN_SPEED = 0.6;
 // one service node (+ icon) per SERVICE_ICONS entry, ringed around the cloud, each
 // fed by a right-angle (elbow) connection trail.
 const CLOUD_NODE_COUNT = SERVICE_ICONS.length;
@@ -707,95 +733,6 @@ function drawBrackets(ctx: CanvasRenderingContext2D, S: number) {
   ctx.fillText("</>", S / 2, S / 2 + S * 0.02);
 }
 
-/** Data-flow diagram — many "streams" enter from the left edge, curve to the right,
- *  and converge into THREE hub nodes stacked on the right side; a dense cluster of
- *  binary digits (0/1) gathers at each hub (the data "lands" there), with a sparse
- *  scatter of digits filling the rest of the right field. Drawn as a flat 2D
- *  composition and sampled by sampleSilhouette like the other glyph shapes, so it
- *  morphs, shimmers and recolours (brand violet/teal) exactly like every model. The
- *  binary is suggestive dot-matrix texture, not crisp text — points, not glyphs. */
-function drawDataFlow(ctx: CanvasRenderingContext2D, S: number) {
-  ctx.fillStyle = "#fff";
-  ctx.strokeStyle = "#fff";
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-
-  // the three convergence hubs on the right (fractions of the canvas)
-  const HUBS = [
-    { x: 0.74 * S, y: 0.24 * S },
-    { x: 0.82 * S, y: 0.51 * S },
-    { x: 0.74 * S, y: 0.78 * S },
-  ];
-
-  // --- streams: enter from the left, curve right, converge into each hub ---
-  const PER_HUB = 5;
-  for (const hub of HUBS) {
-    for (let s = 0; s < PER_HUB; s++) {
-      const f = s / (PER_HUB - 1); // 0..1 across this hub's fan
-      // origins fan out down the left edge, biased toward the hub's height so the
-      // bundle reads as "many feeds aggregating" without becoming a tangle
-      const ox = (0.04 + Math.random() * 0.06) * S;
-      const oy = hub.y + (f - 0.5) * 0.5 * S + (Math.random() * 2 - 1) * 0.03 * S;
-      // ctrl 1 leaves the origin heading right; ctrl 2 approaches the hub nearly
-      // horizontal so all of a hub's streams tuck into a tight convergence point
-      const c1x = ox + (0.28 + Math.random() * 0.1) * S;
-      const c1y = oy;
-      const c2x = hub.x - (0.22 + Math.random() * 0.1) * S;
-      const c2y = hub.y + (oy - hub.y) * 0.12;
-      ctx.lineWidth = 1.3 + Math.random() * 1.0;
-      ctx.beginPath();
-      ctx.moveTo(ox, oy);
-      ctx.bezierCurveTo(c1x, c1y, c2x, c2y, hub.x, hub.y);
-      ctx.stroke();
-      // a glowing node dot part-way along each stream
-      const t = 0.5 + 0.35 * Math.random();
-      const mt = 1 - t;
-      const px = mt * mt * mt * ox + 3 * mt * mt * t * c1x + 3 * mt * t * t * c2x + t * t * t * hub.x;
-      const py = mt * mt * mt * oy + 3 * mt * mt * t * c1y + 3 * mt * t * t * c2y + t * t * t * hub.y;
-      ctx.beginPath();
-      ctx.arc(px, py, S * 0.006, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
-  // --- binary: dense clusters at each hub + a sparse scatter across the right field ---
-  ctx.font = `700 ${Math.floor(S * 0.05)}px ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace`;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  const digit = () => (Math.random() < 0.5 ? "0" : "1");
-
-  // dense binary gathered at the three hubs (the data "lands" here)
-  const cStep = S * 0.046;
-  const cR = S * 0.14; // cluster radius
-  for (const hub of HUBS) {
-    for (let dx = -cR; dx <= cR; dx += cStep) {
-      for (let dy = -cR; dy <= cR; dy += cStep) {
-        // round-ish cluster, denser toward the hub centre
-        const r = Math.hypot(dx, dy) / cR;
-        if (r > 1 || Math.random() < r * 0.55) continue;
-        const jx = (Math.random() * 2 - 1) * cStep * 0.2;
-        const jy = (Math.random() * 2 - 1) * cStep * 0.2;
-        ctx.fillText(digit(), hub.x + dx + jx, hub.y + dy + jy);
-      }
-    }
-    // a bright core dot at the hub itself
-    ctx.beginPath();
-    ctx.arc(hub.x, hub.y, S * 0.016, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  // sparse scatter filling the rest of the right field, so binary reads everywhere
-  const gStep = S * 0.07;
-  for (let gx = 0.46 * S; gx <= 0.96 * S; gx += gStep) {
-    for (let gy = 0.06 * S; gy <= 0.94 * S; gy += gStep) {
-      if (Math.random() < 0.7) continue; // very sparse outside the clusters
-      const jx = (Math.random() * 2 - 1) * gStep * 0.25;
-      const jy = (Math.random() * 2 - 1) * gStep * 0.25;
-      ctx.fillText(digit(), gx + jx, gy + jy);
-    }
-  }
-}
-
 /** Cloud (procedural FALLBACK) — several overlapping spheres (lobes) forming a puffy
  *  cloud; each lobe's SURFACE is sampled and points inside any OTHER lobe are dropped
  *  (the union hull), so no interior dots show. The underside is flattened to a base
@@ -880,6 +817,94 @@ function makeCloud(n: number, span: number): Float32Array {
     out[i * 3] = (out[i * 3] - cx) * sc;
     out[i * 3 + 1] = (out[i * 3 + 1] - cy) * sc;
     out[i * 3 + 2] = (out[i * 3 + 2] - cz) * sc;
+  }
+  return out;
+}
+
+/** A DNA DOUBLE HELIX — the procedural FALLBACK only. The real Experience helix is
+ *  surface-sampled from /models/dna.glb (a true-to-life B-form helix with major/minor
+ *  grooves; see the GLTF effect + the eased swap in useFrame); this stands in until the
+ *  mesh loads, or permanently if the fetch fails (mirrors the brain/cloud fallbacks).
+ *
+ *  Two sugar-phosphate BACKBONE STRANDS spiral around a common vertical (+y) axis, π out
+ *  of phase, joined by horizontal BASE-PAIR RUNGS — the classic twisted-ladder. Points
+ *  are split two ways: the two backbone TUBES (a small round cross-section swept along
+ *  each helical strand) and the RUNGS (θ snapped to evenly-spaced slots → discrete bars
+ *  stepping up the axis, twisting with the strands). The strand cross-section uses a
+ *  proper Frenet-ish frame (radial dir + tangent×radial) so each backbone reads as a
+ *  solid 3-D tube rather than a flat ribbon. Normalized like makeCloud (center on bbox
+ *  midpoint, scale so the largest extent — here the vertical height — == span). */
+function makeDNA(n: number, span: number): Float32Array {
+  const out = new Float32Array(n * 3);
+  const TURNS = 2.5; // full turns of the helix over its height
+  const thetaMax = TURNS * Math.PI * 2;
+  const HELIX_R = 1.0; // radius from the central axis to each backbone strand
+  const HEIGHT = 4.2; // total vertical extent (pre-normalize); > width → reads tall
+  const STRAND_TUBE = 0.17; // round cross-section radius of each backbone tube
+  const RUNG_TUBE = 0.06; // jitter radius fattening each rung into a readable bar
+  const STRAND_FRAC = 0.62; // share of points forming the two backbones (rest → rungs)
+  const RUNGS_PER_TURN = 8; // base pairs per full turn → the ladder's step spacing
+  const RUNG_COUNT = Math.max(1, Math.round(TURNS * RUNGS_PER_TURN));
+  const w = thetaMax; // dθ/dt — angular rate, used for the strand tangent
+
+  for (let i = 0; i < n; i++) {
+    const roll = Math.random();
+
+    if (roll < STRAND_FRAC) {
+      // ---- BACKBONE STRAND ---- one of the two helices (phase 0 or π), as a round
+      // tube of points around the strand's centre curve.
+      const strand = Math.random() < 0.5 ? 0 : 1;
+      const t = Math.random(); // 0 (bottom) → 1 (top) along the helix
+      const theta = t * thetaMax + strand * Math.PI;
+      const y = (t - 0.5) * HEIGHT;
+      const ct = Math.cos(theta), st = Math.sin(theta);
+      // centre-curve point on this strand
+      const cx = HELIX_R * ct, cy = y, cz = HELIX_R * st;
+      // tube frame perpendicular to the tangent: N1 = radial (outward in x–z, already
+      // unit and ⟂ to the tangent), N2 = tangent × N1.
+      let tx = -HELIX_R * w * st, ty = HEIGHT, tz = HELIX_R * w * ct; // tangent
+      const tl = Math.hypot(tx, ty, tz) || 1; tx /= tl; ty /= tl; tz /= tl;
+      const n1x = ct, n1y = 0, n1z = st; // radial
+      let n2x = ty * n1z - tz * n1y, n2y = tz * n1x - tx * n1z, n2z = tx * n1y - ty * n1x;
+      const n2l = Math.hypot(n2x, n2y, n2z) || 1; n2x /= n2l; n2y /= n2l; n2z /= n2l;
+      const a = Math.random() * Math.PI * 2, rr = STRAND_TUBE * Math.sqrt(Math.random());
+      const ca = Math.cos(a) * rr, sa = Math.sin(a) * rr;
+      out[i * 3] = cx + n1x * ca + n2x * sa;
+      out[i * 3 + 1] = cy + n1y * ca + n2y * sa;
+      out[i * 3 + 2] = cz + n1z * ca + n2z * sa;
+      continue;
+    }
+
+    // ---- BASE-PAIR RUNG ---- snap to a discrete step so points cluster into distinct
+    // horizontal bars; each bar spans the full diameter (strand0 → axis → strand1) and
+    // twists with the helix, since its angle θ follows the strands at that height.
+    const ri = Math.floor(Math.random() * RUNG_COUNT);
+    const t = RUNG_COUNT > 1 ? ri / (RUNG_COUNT - 1) : 0.5;
+    const theta = t * thetaMax;
+    const y = (t - 0.5) * HEIGHT;
+    const ct = Math.cos(theta), st = Math.sin(theta);
+    const s = Math.random() * 2 - 1; // -1 (strand1) → 0 (axis) → +1 (strand0)
+    const px = HELIX_R * ct * s, pz = HELIX_R * st * s;
+    out[i * 3] = px + (Math.random() * 2 - 1) * RUNG_TUBE;
+    out[i * 3 + 1] = y + (Math.random() * 2 - 1) * RUNG_TUBE;
+    out[i * 3 + 2] = pz + (Math.random() * 2 - 1) * RUNG_TUBE;
+  }
+  // normalize: center on the bounding-box midpoint, scale so largest extent == span
+  let mnx = Infinity, mny = Infinity, mnz = Infinity;
+  let mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const x = out[i * 3], y = out[i * 3 + 1], z = out[i * 3 + 2];
+    if (x < mnx) mnx = x; if (x > mxx) mxx = x;
+    if (y < mny) mny = y; if (y > mxy) mxy = y;
+    if (z < mnz) mnz = z; if (z > mxz) mxz = z;
+  }
+  const ccx = (mnx + mxx) / 2, ccy = (mny + mxy) / 2, ccz = (mnz + mxz) / 2;
+  const ext = Math.max(mxx - mnx, mxy - mny, mxz - mnz) || 1;
+  const sc = span / ext;
+  for (let i = 0; i < n; i++) {
+    out[i * 3] = (out[i * 3] - ccx) * sc;
+    out[i * 3 + 1] = (out[i * 3 + 1] - ccy) * sc;
+    out[i * 3 + 2] = (out[i * 3 + 2] - ccz) * sc;
   }
   return out;
 }
@@ -1141,6 +1166,8 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
   const landFillActive = useRef(false); // whether the land-fill buffer is currently displaced (scatter/hover)
   const brainFillRef = useRef<THREE.Points>(null); // dense brain dots, only on the brain
   const brainFillHovered = useRef(false); // whether the brain-fill buffer currently holds a hover displacement
+  const dnaFillRef = useRef<THREE.Points>(null); // dense DNA-helix dots, only on Experience
+  const dnaFillHovered = useRef(false); // whether the DNA-fill sizes currently hold a hover swell
 
   const seg = useRef(0); // target segment (i + f) from scroll
   const segSmooth = useRef(0);
@@ -1153,6 +1180,9 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
   // eased cursor yaw, kept apart from inner.rotation.y so the first-gap Y spin
   // (rollY) can be added on top without the easing dragging it back down
   const tiltY = useRef(0);
+  // continuous auto-spin angle for the DNA helix only — accumulates while the DNA is
+  // on screen, resets when it leaves (see the inner-rotation block in useFrame)
+  const dnaSpin = useRef(0);
   // the brain points sampled from the real mesh, set once the GLB resolves. The
   // hero shows the brain at load, so rather than a hard swap (a visible snap) the
   // useFrame eases shapes.brain toward this target, then clears it. null = nothing
@@ -1160,9 +1190,18 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
   const brainTarget = useRef<Float32Array | null>(null);
   // same idea for the dense brain-fill buffer (see brainFillBase below)
   const brainFillTarget = useRef<Float32Array | null>(null);
+  // Load-time shatter→rejoin gating. brainReady flips once the real brain mesh is in
+  // place (or on load failure, so a missing asset can't stall the intro). entryT0 is
+  // the clock time the rejoin began (null while the cloud is still held shattered) —
+  // see the entry block in useFrame.
+  const brainReady = useRef(false);
+  const entryT0 = useRef<number | null>(null);
   // and for the cloud body — sampled from /models/cloud.glb once it resolves, eased
   // into shapes.cloud (procedural makeCloud stands in until then / on failure).
   const cloudTarget = useRef<Float32Array | null>(null);
+  // and for the DNA helix — sampled from /models/dna.glb once it resolves, eased into
+  // shapes.dna (procedural makeDNA stands in until then / on failure).
+  const dnaTarget = useRef<Float32Array | null>(null);
   // force a render after the async brain load lands while in reduced-motion
   // ("demand" frameloop only renders on request)
   const invalidate = useThree((s) => s.invalidate);
@@ -1174,7 +1213,9 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
       // (draw, scale, inflate, wrinkle) — inflate puffs the flat outline into 3D
       brackets: sampleSilhouette(drawBrackets, POINT_COUNT, 4.0 * MODEL_SCALE, 0.5 * MODEL_SCALE),
       cloud: makeCloud(POINT_COUNT, CLOUD_SPAN),
-      dataflow: sampleSilhouette(drawDataFlow, POINT_COUNT, 3.2 * MODEL_SCALE, 0.25 * MODEL_SCALE),
+      // Experience stage — a DNA double helix; procedural until /models/dna.glb loads
+      // and re-samples this buffer (see the GLTF effect + the eased swap in useFrame).
+      dna: makeDNA(POINT_COUNT, DNA_SPAN),
       // Hero/About brain — a procedural silhouette with gyri-like wrinkle, used
       // only until /models/brain.glb loads and re-samples this buffer in place
       // (see the GLTF effect + the eased swap in useFrame).
@@ -1293,13 +1334,23 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     return a;
   }, []);
   const brainFillPositions = useMemo(() => Float32Array.from(brainFillBase), [brainFillBase]);
+  // normalized scatter field ([-1,1]) for the dense fill — drives its load-time
+  // shatter→rejoin, scaled by the live viewport each frame like the sparse cloud's.
+  const brainFillScatter = useMemo(() => {
+    const a = new Float32Array(BRAINFILL_COUNT * 3);
+    for (let i = 0; i < a.length; i++) a[i] = Math.random() * 2 - 1;
+    return a;
+  }, []);
 
   // Load the real brain mesh and re-sample shapes.brain off its surface. Like the
   // coastline fetch above, the procedural silhouette stands in until this resolves
-  // (and stays if it fails). The brain is the HERO shape, on screen at load, so a
-  // hard buffer swap would snap — instead store the sampled cloud as a target that
-  // useFrame eases shapes.brain toward. In reduced motion (frameloop "demand",
-  // useFrame idle) set it directly and request a single render.
+  // (and stays if it fails). The brain is the HERO shape: the load-time entry holds
+  // the cloud SHATTERED until this lands, then sets the mesh DIRECTLY (an invisible
+  // swap — the particles are fully dispersed at that moment) so the rejoin reassembles
+  // straight into the real brain. brainReady releasing the hold is what lets the rejoin
+  // begin. If the mesh is slow and the rejoin already started (ENTRY_MAX_WAIT), fall
+  // back to easing the procedural brain into the mesh (brainTarget) to avoid a snap.
+  // In reduced motion (frameloop "demand", useFrame idle) set it directly and render.
   useEffect(() => {
     let cancelled = false;
     new GLTFLoader()
@@ -1307,16 +1358,16 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
       .then((gltf) => {
         if (cancelled) return;
         const pts = makeBrainFromMesh(gltf.scene, POINT_COUNT, BRAIN_SPAN);
-        if (pts.length === 0) return; // no meshes — keep the fallbacks
+        if (pts.length === 0) {
+          brainReady.current = true; // no meshes — release the hold, keep the fallback
+          return;
+        }
         centerY(pts);
         // dense fill sampled off the same mesh (more points → readable structure)
         const fill = makeBrainFromMesh(gltf.scene, BRAINFILL_COUNT, BRAIN_SPAN);
         const hasFill = fill.length > 0;
         if (hasFill) centerY(fill);
-        if (animate) {
-          brainTarget.current = pts;
-          if (hasFill) brainFillTarget.current = fill;
-        } else {
+        const applyDirect = () => {
           shapes.brain.set(pts);
           if (hasFill) {
             brainFillBase.set(fill);
@@ -1324,11 +1375,24 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
             if (brainFillRef.current)
               (brainFillRef.current.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
           }
+        };
+        if (animate && entryT0.current !== null) {
+          // the rejoin already started (slow load hit ENTRY_MAX_WAIT) — ease the
+          // procedural brain into the mesh to avoid a snap, as before
+          brainTarget.current = pts;
+          if (hasFill) brainFillTarget.current = fill;
+        } else {
+          // still shattered (or reduced motion): drop the real brain in directly so
+          // the rejoin forms IT. Releasing brainReady lets the held rejoin begin.
+          applyDirect();
+          brainReady.current = true;
           invalidate();
         }
       })
       .catch(() => {
-        /* keep the procedural fallback brain */
+        // keep the procedural fallback brain, but release the hold so the shatter
+        // still rejoins (into the stand-in) rather than freezing dispersed forever
+        brainReady.current = true;
       });
     return () => {
       cancelled = true;
@@ -1414,6 +1478,73 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
   }, []);
   const brainFillMaterial = useMemo(() => makePointShaderMaterial(dot, dark), [dot, dark]);
   useEffect(() => () => brainFillMaterial.dispose(), [brainFillMaterial]);
+
+  // Dense DNA fill — a second, independent particle sampling of the SAME double helix,
+  // packed on so the Experience strands + rungs read bold and solid. Seeded procedurally
+  // and re-sampled off /models/dna.glb once it loads. A FULL participant like the land
+  // fill: it scatters into the full-screen burst during a section transition and reacts
+  // to the hover lens, so it needs a live buffer + scatter field (dnaFillBase is the
+  // rest layout; dnaFillPositions is what's rendered). Violet palette matches the cloud.
+  const dnaFillBase = useMemo(() => makeDNA(DNAFILL_COUNT, DNA_SPAN), []);
+  const dnaFillPositions = useMemo(() => Float32Array.from(dnaFillBase), [dnaFillBase]);
+  // normalized scatter field ([-1,1]) — scaled by the live viewport each frame
+  const dnaFillScatter = useMemo(() => {
+    const a = new Float32Array(DNAFILL_COUNT * 3);
+    for (let i = 0; i < a.length; i++) a[i] = Math.random() * 2 - 1;
+    return a;
+  }, []);
+  const dnaFillColors = useMemo(() => buildColors(DNAFILL_COUNT, dark), [dark]);
+  const dnaFillSizes = useMemo(() => {
+    const a = new Float32Array(DNAFILL_COUNT);
+    a.fill(1);
+    return a;
+  }, []);
+  const dnaFillPhases = useMemo(() => {
+    const a = new Float32Array(DNAFILL_COUNT);
+    for (let i = 0; i < DNAFILL_COUNT; i++) a[i] = Math.random() * Math.PI * 2;
+    return a;
+  }, []);
+  const dnaFillMaterial = useMemo(() => makePointShaderMaterial(dot, dark), [dot, dark]);
+  useEffect(() => () => dnaFillMaterial.dispose(), [dnaFillMaterial]);
+
+  // Load the DNA double-helix mesh and re-sample shapes.dna + the dense DNA fill off
+  // its surface — mirrors the cloud loader (procedural makeDNA stands in until this
+  // resolves, and stays if it fails / the asset is absent). trimStem is bypassed (it's
+  // brain-specific). The Experience section sits well below the fold, so the dense fill
+  // is hard-swapped (no visible snap) while the sparse morph cloud eases via dnaTarget,
+  // like the cloud body.
+  useEffect(() => {
+    let cancelled = false;
+    new GLTFLoader()
+      .loadAsync("/models/dna.glb")
+      .then((gltf) => {
+        if (cancelled) return;
+        const pts = makeBrainFromMesh(gltf.scene, POINT_COUNT, DNA_SPAN, false);
+        if (pts.length === 0) return; // no meshes — keep the procedural helix
+        centerY(pts);
+        // dense fill sampled off the same mesh (more points → readable strands/rungs)
+        const fill = makeBrainFromMesh(gltf.scene, DNAFILL_COUNT, DNA_SPAN, false);
+        if (fill.length > 0) {
+          centerY(fill);
+          dnaFillBase.set(fill);
+          dnaFillPositions.set(fill); // rest layout the scatter eases back to
+          if (dnaFillRef.current)
+            (dnaFillRef.current.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+        }
+        if (animate) {
+          dnaTarget.current = pts;
+        } else {
+          shapes.dna.set(pts);
+        }
+        invalidate();
+      })
+      .catch(() => {
+        /* keep the procedural fallback helix */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [shapes, animate, invalidate, dnaFillBase, dnaFillPositions]);
 
   // ---- globe data arcs (Contact globe only) ----
   // Great-circle trails Alappuzha → hubs with bright travelling heads. Like the
@@ -1831,6 +1962,23 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
         cloudTarget.current = null;
       }
     }
+    // same eased swap for the DNA helix once /models/dna.glb resolves
+    if (dnaTarget.current) {
+      const t = dnaTarget.current;
+      const src = shapes.dna;
+      const e = Math.min(1, delta * 2);
+      let maxd = 0;
+      for (let j = 0; j < src.length; j++) {
+        const d = t[j] - src[j];
+        src[j] += d * e;
+        const ad = d < 0 ? -d : d;
+        if (ad > maxd) maxd = ad;
+      }
+      if (maxd < 0.002) {
+        src.set(t);
+        dnaTarget.current = null;
+      }
+    }
     // same eased swap for the dense brain fill; it isn't recomputed every frame, so
     // push the eased base into the live buffer here while the swap is in flight.
     if (brainFillTarget.current && brainFillRef.current) {
@@ -1853,8 +2001,27 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
       }
     }
 
-    // entry: assemble from the scatter field over ~1.6s
-    const entry = animate ? easeOutCubic(clamp01(state.clock.elapsedTime / 1.6)) : 1;
+    // entry: hold the cloud SHATTERED until the real brain mesh is ready (or the
+    // ENTRY_MAX_WAIT fallback fires), then REJOIN from the scatter field over ENTRY_DUR
+    // — so the particles reassemble straight into the actual brain instead of forming
+    // the procedural stand-in first and then visibly morphing. entryT0 latches the
+    // moment the rejoin begins; a short ENTRY_MIN_HOLD keeps the burst on screen even
+    // when the mesh is instantly ready (e.g. cached). `entry` drives the position
+    // assembly; `entryFade` ramps opacity fast so the dispersed shatter stays visible.
+    const elapsed = state.clock.elapsedTime;
+    if (
+      animate &&
+      entryT0.current === null &&
+      ((brainReady.current && elapsed >= ENTRY_MIN_HOLD) || elapsed > ENTRY_MAX_WAIT)
+    ) {
+      entryT0.current = elapsed;
+    }
+    const entry = !animate
+      ? 1
+      : entryT0.current === null
+        ? 0
+        : easeOutCubic(clamp01((elapsed - entryT0.current) / ENTRY_DUR));
+    const entryFade = animate ? clamp01(elapsed / ENTRY_FADE) : 1;
 
     // smooth the scroll segment. The morph now lives inside a ~1-viewport gap, so
     // a laggy follow would let it bleed past the gap into readable content; keep
@@ -1903,13 +2070,10 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     // connection / node / packet layer opacity (invisible off the cloud stage).
     const cloudness =
       (ORDER[i] === "cloud" ? 1 - mf : 0) + (ORDER[next] === "cloud" ? mf : 0);
-    // how much of the CURRENT blended shape is the data-flow section (0..1). That
-    // section renders a dedicated SVG diagram (see DataFlowDiagram), so the particle
-    // cloud fades out as it docks there and fades back in as it scatters away — the
-    // two crossfade instead of overlapping.
-    const dataflowness =
-      (ORDER[i] === "dataflow" ? 1 - mf : 0) + (ORDER[next] === "dataflow" ? mf : 0);
-
+    // how much of the CURRENT blended shape is the DNA helix (0..1) — drives the dense
+    // DNA-fill opacity and shrinks the morph cloud's points to match the fill.
+    const dnaness =
+      (ORDER[i] === "dna" ? 1 - mf : 0) + (ORDER[next] === "dna" ? mf : 0);
     // publish the model's transition state so content sections wait for it to
     // settle before revealing (see Reveal). Settled = entry assembly done AND
     // docked at a section's hold band (tt ≈ 0 or 1); otherwise it's mid-morph,
@@ -2108,29 +2272,48 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     const bf = brainFillMaterial.uniforms;
     bf.uSize.value = (dark ? 0.034 : 0.03) * state.gl.getPixelRatio();
     bf.uScale.value = state.size.height * 0.5;
-    bf.uOpacity.value = (dark ? 0.95 : 0.9) * brainness * (1 - env) * entry * (mobile ? 0.6 : 1);
+    // stays LIT while it bursts apart (no (1 - env)) like the land fill / sparse cloud,
+    // so the whole brain scatters as one bright burst; brainness fades it out as the
+    // brain hands off to the next shape.
+    bf.uOpacity.value = (dark ? 0.95 : 0.9) * brainness * entryFade * (mobile ? 0.6 : 1);
     bf.uTime.value = state.clock.elapsedTime;
     bf.uShimmer.value = animate ? 1 : 0;
     bf.uGlobeness.value = 0;
-    if (brainFillRef.current && brainness > 0.001 && lens > 0.001) {
+    // A FULL participant like the land fill: it scatters into the full-screen burst
+    // during a section transition (env) AND flies in from the shatter on the load entry
+    // (entry), exactly like the sparse cloud — so the WHOLE brain disperses, leaving no
+    // lingering structure on screen. The per-point loop runs only while it's actually
+    // moving (transition / entry / hover); on the settled brain it holds its rest layout
+    // (reset once). (A brain→brain spin gap has env 0, so it spins in shape, not scatter.)
+    const bfMoving = brainness > 0.001 && (env > 0.001 || lens > 0.001 || entry < 0.999);
+    if (brainFillRef.current && bfMoving) {
       for (let q = 0; q < BRAINFILL_COUNT; q++) {
         const ix = q * 3;
         const iy = ix + 1;
-        let mx = brainFillBase[ix];
-        let my = brainFillBase[iy];
+        const iz = ix + 2;
+        const mx = brainFillBase[ix];
+        const my = brainFillBase[iy];
+        const mz = brainFillBase[iz];
+        // hover swell (size only)
         let grow = 0;
-        const dx = mx - lcx;
-        const dy = my - lcy;
-        const cd2 = dx * dx + dy * dy;
-        if (cd2 < HOVER_R2) {
-          const f = 1 - Math.sqrt(cd2) / HOVER_RADIUS;
-          const ff = f * f * (3 - 2 * f);
-          grow = HOVER_GROW * ff * lens;
+        if (lens > 0.001) {
+          const dx = mx - lcx;
+          const dy = my - lcy;
+          const cd2 = dx * dx + dy * dy;
+          if (cd2 < HOVER_R2) {
+            const f = 1 - Math.sqrt(cd2) / HOVER_RADIUS;
+            const ff = f * f * (3 - 2 * f);
+            grow = HOVER_GROW * ff * lens;
+          }
         }
         brainFillSizes[q] = 1 + grow;
-        brainFillPositions[ix] = mx;
-        brainFillPositions[iy] = my;
-        brainFillPositions[ix + 2] = brainFillBase[ix + 2];
+        // scatter blend, then entry blend — identical pipeline to the morph cloud
+        const ex = lerp(mx, brainFillScatter[ix] * sx, env);
+        const ey = lerp(my, brainFillScatter[iy] * sy, env);
+        const ez = lerp(mz, brainFillScatter[iz] * sz, env);
+        brainFillPositions[ix] = lerp(brainFillScatter[ix] * sx, ex, entry);
+        brainFillPositions[iy] = lerp(brainFillScatter[iy] * sy, ey, entry);
+        brainFillPositions[iz] = lerp(brainFillScatter[iz] * sz, ez, entry);
       }
       const bg = brainFillRef.current.geometry;
       (bg.attributes.position as THREE.BufferAttribute).needsUpdate = true;
@@ -2143,6 +2326,64 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
       (bg.attributes.position as THREE.BufferAttribute).needsUpdate = true;
       (bg.attributes.aSize as THREE.BufferAttribute).needsUpdate = true;
       brainFillHovered.current = false;
+    }
+
+    // dense DNA fill — extra particles sampling the same double helix, on the
+    // Experience section only. A FULL participant like the brain fill / land fill: it
+    // scatters into the full-screen burst during a section transition (env) so the whole
+    // helix disperses with no lingering structure, and reacts to the hover size-lens.
+    const cf = dnaFillMaterial.uniforms;
+    cf.uSize.value = (dark ? 0.03 : 0.027) * state.gl.getPixelRatio();
+    cf.uScale.value = state.size.height * 0.5;
+    // stays LIT while it bursts apart (no (1 - env)); dnaness fades it out as the helix
+    // hands off to the next shape.
+    cf.uOpacity.value = (dark ? 0.9 : 0.85) * dnaness * entry * (mobile ? 0.6 : 1);
+    cf.uTime.value = state.clock.elapsedTime;
+    cf.uShimmer.value = animate ? 1 : 0;
+    cf.uGlobeness.value = 0;
+    // runs only while moving (transition / entry / hover); on the settled helix it holds
+    // its rest layout (reset once).
+    const dfMoving = dnaness > 0.001 && (env > 0.001 || lens > 0.001 || entry < 0.999);
+    if (dnaFillRef.current && dfMoving) {
+      for (let q = 0; q < DNAFILL_COUNT; q++) {
+        const ix = q * 3;
+        const iy = ix + 1;
+        const iz = ix + 2;
+        const mx = dnaFillBase[ix];
+        const my = dnaFillBase[iy];
+        const mz = dnaFillBase[iz];
+        // hover swell (size only)
+        let grow = 0;
+        if (lens > 0.001) {
+          const dx = mx - lcx;
+          const dy = my - lcy;
+          const cd2 = dx * dx + dy * dy;
+          if (cd2 < HOVER_R2) {
+            const f = 1 - Math.sqrt(cd2) / HOVER_RADIUS;
+            const ff = f * f * (3 - 2 * f);
+            grow = HOVER_GROW * ff * lens;
+          }
+        }
+        dnaFillSizes[q] = 1 + grow;
+        // scatter blend, then entry blend — identical pipeline to the morph cloud
+        const ex = lerp(mx, dnaFillScatter[ix] * sx, env);
+        const ey = lerp(my, dnaFillScatter[iy] * sy, env);
+        const ez = lerp(mz, dnaFillScatter[iz] * sz, env);
+        dnaFillPositions[ix] = lerp(dnaFillScatter[ix] * sx, ex, entry);
+        dnaFillPositions[iy] = lerp(dnaFillScatter[iy] * sy, ey, entry);
+        dnaFillPositions[iz] = lerp(dnaFillScatter[iz] * sz, ez, entry);
+      }
+      const dg = dnaFillRef.current.geometry;
+      (dg.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+      (dg.attributes.aSize as THREE.BufferAttribute).needsUpdate = true;
+      dnaFillHovered.current = true;
+    } else if (dnaFillRef.current && dnaFillHovered.current) {
+      dnaFillPositions.set(dnaFillBase);
+      dnaFillSizes.fill(1);
+      const dg = dnaFillRef.current.geometry;
+      (dg.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+      (dg.attributes.aSize as THREE.BufferAttribute).needsUpdate = true;
+      dnaFillHovered.current = false;
     }
 
     // globe data arcs — faint great-circle trails + bright travelling heads, only on
@@ -2247,17 +2488,16 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     // fill now uses the same palette). uGlobeness drives the shared front/back fade.
     const mu = modelMaterial.uniforms;
     // shrink the (chunky) morph points wherever a dense companion fill exists — the
-    // globe (land fill) AND the brain (brain fill) — so the two layers read as one
-    // fine cloud instead of chunky dots scattered over fine ones.
-    const dense = Math.max(globeness, brainness);
+    // globe (land fill), the brain (brain fill) AND the DNA helix (DNA fill) — so
+    // the two layers read as one fine cloud instead of chunky dots over fine ones.
+    const dense = Math.max(globeness, brainness, dnaness);
     const landBase = dark ? lerp(0.055, 0.032, dense) : lerp(0.05, 0.03, dense);
     mu.uSize.value = landBase * state.gl.getPixelRatio() * (1 + 0.3 * globeness);
     mu.uScale.value = state.size.height * 0.5;
     mu.uOpacity.value =
       lerp(dark ? 0.95 : 0.85, dark ? 0.95 : 0.9, globeness) *
-      entry *
-      (mobile ? lerp(0.55, 0.6, globeness) : 1) *
-      (1 - dataflowness); // hand the stage to the SVG data-flow diagram at that section
+      entryFade *
+      (mobile ? lerp(0.55, 0.6, globeness) : 1);
     mu.uTime.value = state.clock.elapsedTime;
     mu.uShimmer.value = animate ? lerp(1, 0.5, globeness) : 0;
     mu.uGlobeness.value = globeness;
@@ -2279,7 +2519,13 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
       const ty = animate ? pointer.current.x * 0.12 : 0;
       inner.current.rotation.x += (tx - inner.current.rotation.x) * k;
       tiltY.current += (ty - tiltY.current) * k;
-      inner.current.rotation.y = tiltY.current + rollY;
+      // DNA-only auto-spin: accumulate an angle while the helix is on screen, reset
+      // when it leaves. Applying it × dnaness eases the spin in/out with the morph and
+      // makes it exactly zero off the DNA — so the brain/cloud/brackets/globe rotate
+      // only with the cursor tilt, never inheriting the helix's accumulated angle.
+      if (animate && dnaness > 0.001) dnaSpin.current += delta * DNA_SPIN_SPEED;
+      else dnaSpin.current = 0;
+      inner.current.rotation.y = tiltY.current + rollY + dnaSpin.current * dnaness;
     }
 
     // starfield motion — replicated verbatim from the deployed (main-branch)
@@ -2302,7 +2548,7 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     const su = starMaterial.uniforms;
     su.uSize.value = (dark ? 0.032 : 0.03) * state.gl.getPixelRatio();
     su.uScale.value = state.size.height * 0.5;
-    su.uOpacity.value = (dark ? 0.85 : 0.6) * entry;
+    su.uOpacity.value = (dark ? 0.85 : 0.6) * entryFade;
     su.uTime.value = state.clock.elapsedTime;
     su.uShimmer.value = animate ? 1 : 0;
   });
@@ -2341,6 +2587,18 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
               <bufferAttribute attach="attributes-aColor" args={[brainFillColors, 3]} />
               <bufferAttribute attach="attributes-aSize" args={[brainFillSizes, 1]} />
               <bufferAttribute attach="attributes-aPhase" args={[brainFillPhases, 1]} />
+            </bufferGeometry>
+          </points>
+          {/* dense DNA fill — extra particles on the Experience double helix only
+              (opacity gated by dnaness, hover size-lens in useFrame). Inside the inner
+              group, so it docks / tilts / spins with the helix. Full participant:
+              scatters with the transition (positions animated in useFrame). */}
+          <points ref={dnaFillRef} material={dnaFillMaterial} frustumCulled={false}>
+            <bufferGeometry>
+              <bufferAttribute attach="attributes-position" args={[dnaFillPositions, 3]} />
+              <bufferAttribute attach="attributes-aColor" args={[dnaFillColors, 3]} />
+              <bufferAttribute attach="attributes-aSize" args={[dnaFillSizes, 1]} />
+              <bufferAttribute attach="attributes-aPhase" args={[dnaFillPhases, 1]} />
             </bufferGeometry>
           </points>
           {/* sea dots filling the ocean of the world globe (opacity + front/back
