@@ -40,14 +40,18 @@ import { setModelTransitioning } from "@/components/three/model-phase";
 // Shared by every morph shape (one cloud morphs between them, so they all use the
 // same count). Bumped well past the original 2400 so the brain's gyri/sulci read
 // as real structure instead of a sparse scatter — which only makes the glyphs and
-// the globe morph cloud richer too. The per-frame morph/links loops are O(this);
-// 9000 is still trivial on the CPU.
+// the globe morph cloud richer too. The per-frame morph loop is O(this); 9000 is
+// still trivial on the CPU. (The brain gets extra density from BRAINFILL_COUNT.)
 const POINT_COUNT = 9000;
 const STAR_COUNT = 3500;
 // white sea dots that fill the ocean between continents on the world globe —
 // denser than the land so the sea reads as a full surface, randomly scattered
 const OCEAN_COUNT = 6000;
-const LINKS_PER_POINT = 1;
+// Dense BRAIN fill. The shared morph cloud (POINT_COUNT) is sampled across every
+// shape, so it can't be made denser for the brain alone — a separate high-count
+// cloud, sampled off the same brain mesh, is layered onto the Hero/About brain
+// only (the way LANDFILL_COUNT densifies the globe). Invisible on every other shape.
+const BRAINFILL_COUNT = 30000;
 
 // Overall size of the morphing model. Bump this to scale every shape together;
 // the starfield and the full-screen scatter spread are deliberately left
@@ -87,6 +91,24 @@ const SHIMMER_FREQ = 2.0;
 // Adjacent IDENTICAL shapes (Hero/About brain, Projects/Education </>) spin about
 // the Y axis between sections instead of scattering — see rollY / spinGap below.
 const ORDER = ["brain", "brain", "gear", "braces", "brackets", "brackets", "globe"] as const;
+
+// Per-section target Y-rotation (radians), interpolated by morph progress in
+// useFrame. A gap between two IDENTICAL shapes turns a VISIBLE amount: the brain
+// pair a HALF turn (180°), the </> pair a FULL turn (360°). The mixed-shape gap
+// right after a half-turn then adds a HIDDEN half turn (masked by the full-screen
+// scatter) so the next glyph faces front again. Building absolute per-section yaws
+// (rather than resetting each gap) keeps rotation.y continuous everywhere — no snap.
+const SECTION_YAW: readonly number[] = (() => {
+  const half = [0]; // accumulated half-turns (×π)
+  for (let g = 0; g < ORDER.length - 1; g++) {
+    const spin = ORDER[g] === ORDER[g + 1];
+    let d = 0;
+    if (spin) d = ORDER[g] === "brain" ? 1 : 2; // brain: 180°, others: 360°
+    else if (half[g] % 2 !== 0) d = 1; // realign a back-facing shape to front (under scatter)
+    half.push(half[g] + d);
+  }
+  return half.map((h) => h * Math.PI);
+})();
 
 // The Hero/About brain is sampled from a real anatomical mesh (/models/brain.glb);
 // until it loads (or if the fetch fails) a procedural silhouette stands in. The
@@ -646,12 +668,6 @@ function makeDotTexture(): THREE.Texture | null {
 }
 
 // ---------------------------------------------------------------- palette
-// The globe particle color, used by the dense land-fill cloud and by the land
-// morph cloud's globe tint so the whole globe reads as one particle style. Uses the
-// orchid violet from the palette below (hue ~269°), NOT the brand #8052ff: the brand
-// is blue-dominant (B=255), so rendered bright + dense the globe read as blue. Orchid
-// keeps the globe clearly PURPLE, matching how the faint node-link lines read.
-const GLOBE_DOT_COLOR = (dark: boolean) => (dark ? "#b46cff" : "#8e4fe0");
 
 function buildColors(n: number, dark: boolean): Float32Array {
   // Shades of violet around the Plum Voltage brand (#8052ff), keyed to the
@@ -761,11 +777,12 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
   const outer = useRef<THREE.Group>(null);
   const inner = useRef<THREE.Group>(null);
   const pointsRef = useRef<THREE.Points>(null);
-  const linesRef = useRef<THREE.LineSegments>(null);
   const oceanRef = useRef<THREE.Points>(null); // sea dots, only shown on the globe
   const oceanHovered = useRef(false); // whether the ocean buffer currently holds a hover displacement
   const landFillRef = useRef<THREE.Points>(null); // dense land dots, only on the globe
   const landFillActive = useRef(false); // whether the land-fill buffer is currently displaced (scatter/hover)
+  const brainFillRef = useRef<THREE.Points>(null); // dense brain dots, only on the brain
+  const brainFillHovered = useRef(false); // whether the brain-fill buffer currently holds a hover displacement
 
   const seg = useRef(0); // target segment (i + f) from scroll
   const segSmooth = useRef(0);
@@ -783,6 +800,8 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
   // useFrame eases shapes.brain toward this target, then clears it. null = nothing
   // pending (still on the procedural fallback, or already converged).
   const brainTarget = useRef<Float32Array | null>(null);
+  // same idea for the dense brain-fill buffer (see brainFillBase below)
+  const brainFillTarget = useRef<Float32Array | null>(null);
   // force a render after the async brain load lands while in reduced-motion
   // ("demand" frameloop only renders on request)
   const invalidate = useThree((s) => s.invalidate);
@@ -824,18 +843,9 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
   // oceanPositions is the live buffer the hover lens writes into.
   const oceanBase = useMemo(() => makeGlobeOcean(OCEAN_COUNT, GLOBE_RADIUS), []);
   const oceanPositions = useMemo(() => Float32Array.from(oceanBase), [oceanBase]);
-  const oceanColors = useMemo(() => {
-    // orchid violet — same as the land fill / GLOBE_DOT_COLOR — so the sea reads as
-    // part of the same purple globe (was white, then briefly the blue-leaning brand)
-    const c = new THREE.Color(dark ? "#b46cff" : "#8e4fe0");
-    const a = new Float32Array(OCEAN_COUNT * 3);
-    for (let i = 0; i < OCEAN_COUNT; i++) {
-      a[i * 3] = c.r;
-      a[i * 3 + 1] = c.g;
-      a[i * 3 + 2] = c.b;
-    }
-    return a;
-  }, [dark]);
+  // Same varied violet palette as the morph cloud / brain, so the globe reads in the
+  // exact colour scheme as every other model (was a single flat orchid).
+  const oceanColors = useMemo(() => buildColors(OCEAN_COUNT, dark), [dark]);
   const oceanSizes = useMemo(() => {
     const a = new Float32Array(OCEAN_COUNT);
     a.fill(1);
@@ -848,7 +858,7 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
   // Dense land fill — the continents, randomly scattered (see sampleGlobeRandom). A
   // FULL participant like the morph cloud: it scatters with the transition and reacts
   // to the hover lens (see useFrame), so it needs a live buffer + scatter field +
-  // per-point sizes. Bright globe color, driven in useFrame.
+  // per-point sizes.
   const landFillBase = useMemo(() => makeGlobeLandFill(LANDFILL_COUNT, GLOBE_RADIUS), []);
   const landFillPositions = useMemo(() => Float32Array.from(landFillBase), [landFillBase]);
   const landFillScatter = useMemo(() => {
@@ -861,16 +871,8 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     a.fill(1);
     return a;
   }, []);
-  const landFillColors = useMemo(() => {
-    const c = new THREE.Color(GLOBE_DOT_COLOR(dark));
-    const a = new Float32Array(LANDFILL_COUNT * 3);
-    for (let i = 0; i < LANDFILL_COUNT; i++) {
-      a[i * 3] = c.r;
-      a[i * 3 + 1] = c.g;
-      a[i * 3 + 2] = c.b;
-    }
-    return a;
-  }, [dark]);
+  // Same varied violet palette as the morph cloud (was a single flat globe color).
+  const landFillColors = useMemo(() => buildColors(LANDFILL_COUNT, dark), [dark]);
   const landFillPhases = useMemo(() => {
     const a = new Float32Array(LANDFILL_COUNT);
     for (let i = 0; i < LANDFILL_COUNT; i++) a[i] = Math.random() * Math.PI * 2;
@@ -918,6 +920,19 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     };
   }, [shapes, oceanBase, oceanPositions, landFillBase, landFillPositions]);
 
+  // Dense brain fill — extra particles on the Hero/About brain ONLY, sampled off the
+  // same mesh as the morph cloud (see the GLTF effect below). Mirrors the ocean dots:
+  // fades out during the scatter (so it never needs to scatter itself) and only runs a
+  // per-point loop while hovered. brainFillBase is the rest layout; brainFillPositions
+  // is the live buffer the hover lens writes into. Seeded with a dense procedural brain
+  // until the GLB lands, then eased to the mesh sample (brainFillTarget).
+  const brainFillBase = useMemo(() => {
+    const a = sampleSilhouette(drawBrain, BRAINFILL_COUNT, BRAIN_SPAN, 0.6 * MODEL_SCALE, 0.35 * MODEL_SCALE);
+    centerY(a);
+    return a;
+  }, []);
+  const brainFillPositions = useMemo(() => Float32Array.from(brainFillBase), [brainFillBase]);
+
   // Load the real brain mesh and re-sample shapes.brain off its surface. Like the
   // coastline fetch above, the procedural silhouette stands in until this resolves
   // (and stays if it fails). The brain is the HERO shape, on screen at load, so a
@@ -931,12 +946,23 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
       .then((gltf) => {
         if (cancelled) return;
         const pts = makeBrainFromMesh(gltf.scene, POINT_COUNT, BRAIN_SPAN);
-        if (pts.length === 0) return; // no meshes — keep the fallback
+        if (pts.length === 0) return; // no meshes — keep the fallbacks
         centerY(pts);
+        // dense fill sampled off the same mesh (more points → readable structure)
+        const fill = makeBrainFromMesh(gltf.scene, BRAINFILL_COUNT, BRAIN_SPAN);
+        const hasFill = fill.length > 0;
+        if (hasFill) centerY(fill);
         if (animate) {
           brainTarget.current = pts;
+          if (hasFill) brainFillTarget.current = fill;
         } else {
           shapes.brain.set(pts);
+          if (hasFill) {
+            brainFillBase.set(fill);
+            brainFillPositions.set(fill);
+            if (brainFillRef.current)
+              (brainFillRef.current.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+          }
           invalidate();
         }
       })
@@ -946,7 +972,7 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [shapes, animate, invalidate]);
+  }, [shapes, animate, invalidate, brainFillBase, brainFillPositions]);
 
   // soft round sprite shared by both clouds (clips the default square points)
   const dot = useMemo(makeDotTexture, []);
@@ -971,11 +997,6 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
   // uOpacity/uTime/uShimmer are refreshed each frame in useFrame.
   const modelMaterial = useMemo(() => makePointShaderMaterial(dot, dark), [dot, dark]);
   useEffect(() => () => modelMaterial.dispose(), [modelMaterial]);
-  // On the globe the morph cloud's land dots adopt the bright globe color
-  // (uTintAmount = globeness in useFrame) so they match the dense land-fill cloud.
-  useEffect(() => {
-    modelMaterial.uniforms.uTint.value.set(GLOBE_DOT_COLOR(dark));
-  }, [modelMaterial, dark]);
   // Same shader for the ocean dots so the far-hemisphere sea fades out too.
   const oceanMaterial = useMemo(() => makePointShaderMaterial(dot, dark), [dot, dark]);
   useEffect(() => () => oceanMaterial.dispose(), [oceanMaterial]);
@@ -990,23 +1011,21 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     return a;
   }, []);
 
-  // fixed node-graph links
-  const linkPairs = useMemo(() => {
-    const arr = new Int32Array(POINT_COUNT * LINKS_PER_POINT * 2);
-    for (let i = 0; i < POINT_COUNT; i++) {
-      for (let k = 0; k < LINKS_PER_POINT; k++) {
-        const j = (i + 1 + k * 41 + ((i * 7) % 17)) % POINT_COUNT;
-        const slot = (i * LINKS_PER_POINT + k) * 2;
-        arr[slot] = i;
-        arr[slot + 1] = j;
-      }
-    }
-    return arr;
+  // Dense brain-fill appearance buffers (the position buffers live above, next to
+  // the loaders). Violet palette matches the morph cloud so the two read as one.
+  const brainFillColors = useMemo(() => buildColors(BRAINFILL_COUNT, dark), [dark]);
+  const brainFillSizes = useMemo(() => {
+    const a = new Float32Array(BRAINFILL_COUNT);
+    a.fill(1);
+    return a;
   }, []);
-  const linkPositions = useMemo(
-    () => new Float32Array(POINT_COUNT * LINKS_PER_POINT * 2 * 3),
-    []
-  );
+  const brainFillPhases = useMemo(() => {
+    const a = new Float32Array(BRAINFILL_COUNT);
+    for (let i = 0; i < BRAINFILL_COUNT; i++) a[i] = Math.random() * Math.PI * 2;
+    return a;
+  }, []);
+  const brainFillMaterial = useMemo(() => makePointShaderMaterial(dot, dark), [dot, dark]);
+  useEffect(() => () => brainFillMaterial.dispose(), [brainFillMaterial]);
 
   // ---- starfield (always on) ----
   // Laid out exactly like the deployed (main-branch) hero point cloud: a soft
@@ -1196,6 +1215,27 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
         brainTarget.current = null;
       }
     }
+    // same eased swap for the dense brain fill; it isn't recomputed every frame, so
+    // push the eased base into the live buffer here while the swap is in flight.
+    if (brainFillTarget.current && brainFillRef.current) {
+      const t = brainFillTarget.current;
+      const src = brainFillBase;
+      const e = Math.min(1, delta * 2);
+      let maxd = 0;
+      for (let j = 0; j < src.length; j++) {
+        const d = t[j] - src[j];
+        src[j] += d * e;
+        const ad = d < 0 ? -d : d;
+        if (ad > maxd) maxd = ad;
+      }
+      brainFillPositions.set(brainFillBase);
+      (brainFillRef.current.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+      if (maxd < 0.002) {
+        src.set(t);
+        brainFillPositions.set(t);
+        brainFillTarget.current = null;
+      }
+    }
 
     // entry: assemble from the scatter field over ~1.6s
     const entry = animate ? easeOutCubic(clamp01(state.clock.elapsedTime / 1.6)) : 1;
@@ -1229,16 +1269,20 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     // so it leaves/returns to rest with zero velocity: particles ease outward and
     // ease back in smoothly instead of jolting at the start/end of the burst.
     const env = animate && !spinGap ? Math.sin(Math.PI * mf) : 0;
-    // 0 → 2π across a spin gap (eased to match the morph). A FULL turn, not a
-    // half: a 180° turn about Y would land on the mirrored back face and snap at
-    // the boundary. rollY drops to 0 at the next section, but tt has saturated to
-    // 1 by then so the spin is already a full 2π — and a full turn == 0, so the
-    // reset is imperceptible and later shapes stay upright.
-    const rollY = spinGap ? 2 * Math.PI * mf : 0;
-    // how much of the CURRENT blended shape is the world globe (0..1). The
-    // node-link web reads as clutter over a map, so links fade out as it forms.
+    // Y-rotation: ease from this section's target yaw to the next's (SECTION_YAW).
+    // The brain gap turns a VISIBLE 180°, the </> gap a VISIBLE 360°; the mixed gap
+    // after a 180° adds a HIDDEN 180° (under the scatter) to re-front the next glyph.
+    // Interpolating absolute per-section yaws keeps rotation.y continuous across
+    // every boundary, so there's no snap even though the brain ends facing backward.
+    const rollY = animate ? lerp(SECTION_YAW[i], SECTION_YAW[next], mf) : 0;
+    // how much of the CURRENT blended shape is the world globe (0..1) — drives the
+    // ocean + land-fill opacity and the morph cloud's globe tint / front-back fade.
     const globeness =
       (ORDER[i] === "globe" ? 1 - mf : 0) + (ORDER[next] === "globe" ? mf : 0);
+    // how much of the CURRENT blended shape is the brain (0..1) — drives the dense
+    // brain-fill opacity and shrinks the morph cloud's points to match the fill.
+    const brainness =
+      (ORDER[i] === "brain" ? 1 - mf : 0) + (ORDER[next] === "brain" ? mf : 0);
 
     // publish the model's transition state so content sections wait for it to
     // settle before revealing (see Reveal). Settled = entry assembly done AND
@@ -1329,28 +1373,6 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     }
     (pointsRef.current.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
     (pointsRef.current.geometry.attributes.aSize as THREE.BufferAttribute).needsUpdate = true;
-
-    // links follow live positions; fade out while scattered
-    if (linesRef.current) {
-      const lp = linkPositions;
-      const np = linkPairs.length / 2;
-      for (let l = 0; l < np; l++) {
-        const ai = linkPairs[l * 2] * 3;
-        const bi = linkPairs[l * 2 + 1] * 3;
-        const o = l * 6;
-        lp[o] = positions[ai];
-        lp[o + 1] = positions[ai + 1];
-        lp[o + 2] = positions[ai + 2];
-        lp[o + 3] = positions[bi];
-        lp[o + 4] = positions[bi + 1];
-        lp[o + 5] = positions[bi + 2];
-      }
-      (linesRef.current.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
-      const lm = linesRef.current.material as THREE.LineBasicMaterial;
-      // very faint — links hint at a network without filling the silhouette;
-      // fully faded on the world globe, where the web would obscure the land.
-      lm.opacity = (dark ? 0.04 : 0.03) * (1 - env) * entry * (1 - globeness);
-    }
 
     // ocean sea-dots: only on the settled globe — fade in with globeness, gated
     // off during the scatter (1 - env) so they don't appear while it's dispersed.
@@ -1462,12 +1484,66 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
       landFillActive.current = false;
     }
 
+    // dense brain fill — extra brain dots, on the Hero/About brain only. Like the
+    // ocean it fades out during the scatter (1 - env) so it never has to scatter,
+    // and only runs a per-point loop while hovered; otherwise it holds its rest
+    // layout. It lives inside the inner group, so it docks / tilts / spins with the
+    // brain. No front/back fade (uGlobeness 0) — the brain isn't a sphere shell.
+    const bf = brainFillMaterial.uniforms;
+    bf.uSize.value = (dark ? 0.034 : 0.03) * state.gl.getPixelRatio();
+    bf.uScale.value = state.size.height * 0.5;
+    bf.uOpacity.value = (dark ? 0.95 : 0.9) * brainness * (1 - env) * entry * (mobile ? 0.6 : 1);
+    bf.uTime.value = state.clock.elapsedTime;
+    bf.uShimmer.value = animate ? 1 : 0;
+    bf.uGlobeness.value = 0;
+    if (brainFillRef.current && brainness > 0.001 && lens > 0.001) {
+      for (let q = 0; q < BRAINFILL_COUNT; q++) {
+        const ix = q * 3;
+        const iy = ix + 1;
+        let mx = brainFillBase[ix];
+        let my = brainFillBase[iy];
+        let grow = 0;
+        const dx = mx - lcx;
+        const dy = my - lcy;
+        const cd2 = dx * dx + dy * dy;
+        if (cd2 < HOVER_R2) {
+          const cd = Math.sqrt(cd2) || 1e-4;
+          const f = 1 - cd / HOVER_RADIUS;
+          const ff = f * f;
+          grow = HOVER_GROW * ff * lens;
+          const spread = (HOVER_SPREAD * ff * lens) / cd;
+          mx += dx * spread;
+          my += dy * spread;
+        }
+        brainFillSizes[q] = 1 + grow;
+        brainFillPositions[ix] = mx;
+        brainFillPositions[iy] = my;
+        brainFillPositions[ix + 2] = brainFillBase[ix + 2];
+      }
+      const bg = brainFillRef.current.geometry;
+      (bg.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+      (bg.attributes.aSize as THREE.BufferAttribute).needsUpdate = true;
+      brainFillHovered.current = true;
+    } else if (brainFillRef.current && brainFillHovered.current) {
+      brainFillPositions.set(brainFillBase);
+      brainFillSizes.fill(1);
+      const bg = brainFillRef.current.geometry;
+      (bg.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+      (bg.attributes.aSize as THREE.BufferAttribute).needsUpdate = true;
+      brainFillHovered.current = false;
+    }
+
     // drive the morph cloud's material. On the GLOBE its (sparse) land dots ease to
-    // the dense land-fill style — size → 0.032, color → globe color (uTintAmount),
-    // opacity, shimmer → 0.5 — so they blend into the dense fill rather than reading
-    // as a second, chunkier layer. uGlobeness drives the shared front/back fade.
+    // the dense land-fill style — size → 0.032, opacity, shimmer → 0.5 — so they
+    // blend into the dense fill rather than reading as a second, chunkier layer. The
+    // colour is left untinted so the globe keeps the shared violet palette (the land
+    // fill now uses the same palette). uGlobeness drives the shared front/back fade.
     const mu = modelMaterial.uniforms;
-    const landBase = dark ? lerp(0.055, 0.032, globeness) : lerp(0.05, 0.03, globeness);
+    // shrink the (chunky) morph points wherever a dense companion fill exists — the
+    // globe (land fill) AND the brain (brain fill) — so the two layers read as one
+    // fine cloud instead of chunky dots scattered over fine ones.
+    const dense = Math.max(globeness, brainness);
+    const landBase = dark ? lerp(0.055, 0.032, dense) : lerp(0.05, 0.03, dense);
     mu.uSize.value = landBase * state.gl.getPixelRatio() * (1 + 0.3 * globeness);
     mu.uScale.value = state.size.height * 0.5;
     mu.uOpacity.value =
@@ -1477,7 +1553,7 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     mu.uTime.value = state.clock.elapsedTime;
     mu.uShimmer.value = animate ? lerp(1, 0.5, globeness) : 0;
     mu.uGlobeness.value = globeness;
-    mu.uTintAmount.value = globeness;
+    mu.uTintAmount.value = 0; // no globe tint — keep the shared violet palette
 
     // outer = horizontal dock + per-section scale (HERO_SCALE on section 0, all
     // else 1; eases to 1 across the first gap). NO auto-rotation / bob.
@@ -1548,18 +1624,17 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
               <bufferAttribute attach="attributes-aPhase" args={[phases, 1]} />
             </bufferGeometry>
           </points>
-          <lineSegments ref={linesRef} frustumCulled={false}>
+          {/* dense brain fill — extra particles on the Hero/About brain only
+              (opacity gated by brainness, hover lens in useFrame). Inside the inner
+              group, so it docks / tilts / spins with the brain. */}
+          <points ref={brainFillRef} material={brainFillMaterial} frustumCulled={false}>
             <bufferGeometry>
-              <bufferAttribute attach="attributes-position" args={[linkPositions, 3]} />
+              <bufferAttribute attach="attributes-position" args={[brainFillPositions, 3]} />
+              <bufferAttribute attach="attributes-aColor" args={[brainFillColors, 3]} />
+              <bufferAttribute attach="attributes-aSize" args={[brainFillSizes, 1]} />
+              <bufferAttribute attach="attributes-aPhase" args={[brainFillPhases, 1]} />
             </bufferGeometry>
-            <lineBasicMaterial
-              color={dark ? "#8052ff" : "#6b3df0"}
-              transparent
-              opacity={dark ? 0.09 : 0.07}
-              depthWrite={false}
-              blending={dark ? THREE.AdditiveBlending : THREE.NormalBlending}
-            />
-          </lineSegments>
+          </points>
           {/* sea dots filling the ocean of the world globe (opacity + front/back
               fade + hover swell driven per-frame via the shared shader — invisible
               on every other shape, and the far-hemisphere sea hides like the land) */}
