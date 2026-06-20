@@ -2,14 +2,41 @@
 
 import { useEffect, useMemo, useRef } from "react";
 import { Canvas, useFrame, useThree, type RootState } from "@react-three/fiber";
+import { Html } from "@react-three/drei";
 import { useReducedMotion } from "framer-motion";
 import { useTheme } from "next-themes";
+import {
+  Globe,
+  Search,
+  Mail,
+  Laptop,
+  Users,
+  Lightbulb,
+  Lock,
+  Smartphone,
+  ShoppingCart,
+  type LucideIcon,
+} from "lucide-react";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MeshSurfaceSampler } from "three/examples/jsm/math/MeshSurfaceSampler.js";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 import { setModelTransitioning } from "@/components/three/model-phase";
+
+/** Real service icons ringed around the cloud (one per node), echoing the reference:
+ *  world, search, mail, laptop, people, ideas, security, mobile, commerce. */
+const SERVICE_ICONS: LucideIcon[] = [
+  Globe,
+  Search,
+  Mail,
+  Laptop,
+  Users,
+  Lightbulb,
+  Lock,
+  Smartphone,
+  ShoppingCart,
+];
 
 /**
  * ParticleField — the "Dala" constellation, ported and choreographed.
@@ -18,7 +45,7 @@ import { setModelTransitioning } from "@/components/three/model-phase";
  * docks to alternating sides per section, and SCATTERS full-screen in the gaps
  * between sections before reassembling on the opposite side as the next shape:
  *
- *   brain → brain → gear → { } → </> → </> → globe
+ *   brain → brain → cloud → data-flow → </> → </> → globe
  *
  * Gaps between two IDENTICAL shapes (Hero↔About brain, Projects↔Education </>)
  * are special: instead of scattering they spin a full 360° about the vertical Y
@@ -90,7 +117,7 @@ const SHIMMER_FREQ = 2.0;
 // Per-section shape + side. order.length must match the number of <section>s.
 // Adjacent IDENTICAL shapes (Hero/About brain, Projects/Education </>) spin about
 // the Y axis between sections instead of scattering — see rollY / spinGap below.
-const ORDER = ["brain", "brain", "gear", "braces", "brackets", "brackets", "globe"] as const;
+const ORDER = ["brain", "brain", "cloud", "dataflow", "brackets", "brackets", "globe"] as const;
 
 // Per-section target Y-rotation (radians), interpolated by morph progress in
 // useFrame. A gap between two IDENTICAL shapes turns a VISIBLE amount: the brain
@@ -116,6 +143,33 @@ const SECTION_YAW: readonly number[] = (() => {
 // glyphs' 4.0·MODEL_SCALE span because the brain fills its whole silhouette (the
 // glyphs don't) — an equal span overflowed the viewport on the hero.
 const BRAIN_SPAN = 2.6 * MODEL_SCALE;
+// Cloud (systems stage) — sampled from /models/cloud.glb when present, else the
+// procedural makeCloud fallback. Normalized so its LARGEST extent == CLOUD_SPAN.
+const CLOUD_SPAN = 2.6 * MODEL_SCALE;
+// the cloud is wider than tall — approximate half-extents used to anchor the
+// orthogonal connector elbows on the cloud's edge.
+const CLOUD_HALF_W = CLOUD_SPAN * 0.5;
+const CLOUD_HALF_H = CLOUD_SPAN * 0.22;
+// one service node (+ icon) per SERVICE_ICONS entry, ringed around the cloud, each
+// fed by a right-angle (elbow) connection trail.
+const CLOUD_NODE_COUNT = SERVICE_ICONS.length;
+const CONN_SAMPLES = 40; // points per connection trail (denser → reads as a line)
+// Per-node positional nudges. The icon AND its whole connector translate together by
+// this offset, so the line's origin shifts with the icon and (being a pure shift) every
+// leg stays axis-aligned / perpendicular. Indices follow SERVICE_ICONS; only four are
+// nudged per request: world(0) ↑, mail(2) ←, phone(7) →, cart(8) ↓.
+const NUDGE = 0.07 * CLOUD_SPAN;
+const NODE_OFFSET: [number, number][] = [
+  [0, NUDGE], // 0 Globe (world)        → up
+  [0, 0], // 1 Search
+  [-NUDGE, 0], // 2 Mail                → left
+  [0, 0], // 3 Laptop
+  [0, 0], // 4 Users
+  [0, 0], // 5 Lightbulb
+  [0, 0], // 6 Lock
+  [NUDGE, 0], // 7 Smartphone (phone)   → right
+  [0, -NUDGE], // 8 ShoppingCart (cart) → down
+];
 // even index → model docks RIGHT (+1), odd → LEFT (-1). Content sits opposite.
 const sideSign = (i: number) => (i % 2 === 0 ? 1 : -1);
 // How far the model docks from center, as a fraction of viewport width. The
@@ -339,6 +393,70 @@ function makeGlobeOcean(n: number, radius: number): Float32Array {
   return sampleGlobeRandom(n, radius, (isLand, lon, lat) => !isLand(lon, lat));
 }
 
+// ---------------------------------------------------------------- globe arcs
+// Great-circle "data arcs" on the Contact globe: faint dotted trails flying from
+// Alappuzha out to cloud regions / hubs, each with a bright travelling head. They
+// ride the SAME India-front, forward-pitched sphere as the land/ocean dots, so they
+// must use the identical (lon,lat)→position transform (see sampleGlobeRandom).
+const ARC_SOURCE = { lon: 76.3, lat: 9.5 }; // Alappuzha
+const ARC_HUBS = [
+  { lon: 72.8, lat: 19.1 }, // Mumbai
+  { lon: 103.8, lat: 1.35 }, // Singapore
+  { lon: 8.7, lat: 50.1 }, // Frankfurt
+  { lon: -77.5, lat: 39.0 }, // N. Virginia
+  { lon: 139.7, lat: 35.7 }, // Tokyo
+];
+const ARC_SAMPLES = 64; // points per arc trail
+const ARC_LIFT = 0.18; // how high the arc bows off the surface at its midpoint
+
+/** (lon,lat)→position on the India-front, GLOBE_TILT_DEG-pitched sphere — the exact
+ *  transform sampleGlobeRandom bakes into the globe dots, factored out so arcs land
+ *  precisely on the visible globe. */
+function lonLatToGlobe(lonDeg: number, latDeg: number, radius: number): [number, number, number] {
+  const lon0 = (INDIA_LON * Math.PI) / 180;
+  const tilt = (GLOBE_TILT_DEG * Math.PI) / 180;
+  const ct = Math.cos(tilt);
+  const st = Math.sin(tilt);
+  const lat = (latDeg * Math.PI) / 180;
+  const lam = (lonDeg * Math.PI) / 180 - lon0;
+  const cl = Math.cos(lat);
+  const x0 = radius * cl * Math.sin(lam);
+  const y0 = radius * Math.sin(lat);
+  const z0 = radius * cl * Math.cos(lam);
+  return [x0, y0 * ct - z0 * st, y0 * st + z0 * ct];
+}
+
+/** Sample a great-circle arc (unit-vector slerp) between two lon/lat points, bowed
+ *  outward by ARC_LIFT at its midpoint. Endpoints are taken in the globe's final
+ *  rotated/tilted space (radius 1 → unit vectors), so the slerp follows the visible
+ *  sphere's surface. */
+function buildArc(srcLon: number, srcLat: number, dstLon: number, dstLat: number, radius: number): Float32Array {
+  const a = lonLatToGlobe(srcLon, srcLat, 1);
+  const b = lonLatToGlobe(dstLon, dstLat, 1);
+  const d = Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2]));
+  const omega = Math.acos(d);
+  const sinO = Math.sin(omega);
+  const out = new Float32Array(ARC_SAMPLES * 3);
+  for (let i = 0; i < ARC_SAMPLES; i++) {
+    const u = i / (ARC_SAMPLES - 1);
+    let vx: number, vy: number, vz: number;
+    if (sinO < 1e-4) {
+      vx = a[0]; vy = a[1]; vz = a[2];
+    } else {
+      const w0 = Math.sin((1 - u) * omega) / sinO;
+      const w1 = Math.sin(u * omega) / sinO;
+      vx = a[0] * w0 + b[0] * w1;
+      vy = a[1] * w0 + b[1] * w1;
+      vz = a[2] * w0 + b[2] * w1;
+    }
+    const lift = 1 + ARC_LIFT * Math.sin(Math.PI * u);
+    out[i * 3] = vx * radius * lift;
+    out[i * 3 + 1] = vy * radius * lift;
+    out[i * 3 + 2] = vz * radius * lift;
+  }
+  return out;
+}
+
 /**
  * Trim the thin brainstem/spinal stub off a non-indexed triangle soup so the
  * cerebrum — not the stem — dominates. The stem stretches the model's longest
@@ -420,7 +538,7 @@ function trimStem(pos: Float32Array): Float32Array {
  * recentred on its bounding box and uniformly scaled so its largest dimension ==
  * `span`, to match the glyph shapes. Returns zeros if the scene has no meshes.
  */
-function makeBrainFromMesh(root: THREE.Object3D, n: number, span: number): Float32Array {
+function makeBrainFromMesh(root: THREE.Object3D, n: number, span: number, trim = true): Float32Array {
   const out = new Float32Array(n * 3);
   root.updateMatrixWorld(true);
   const geoms: THREE.BufferGeometry[] = [];
@@ -438,11 +556,19 @@ function makeBrainFromMesh(root: THREE.Object3D, n: number, span: number): Float
   const merged = geoms.length === 1 ? geoms[0] : mergeGeometries(geoms, false);
   if (!merged) return out;
 
-  // trim the thin brainstem so the cerebrum (not the stem) fills `span` below
+  // trim the thin brainstem so the cerebrum (not the stem) fills `span` below.
+  // `trim` is bypassed for non-brain meshes (e.g. the cloud) where the heuristic
+  // — tuned for the stem — would wrongly lop off a legitimate tendril.
   const mergedPos = merged.getAttribute("position");
   if (!mergedPos) return out;
   const geom = new THREE.BufferGeometry();
-  geom.setAttribute("position", new THREE.BufferAttribute(trimStem(mergedPos.array as Float32Array), 3));
+  geom.setAttribute(
+    "position",
+    new THREE.BufferAttribute(
+      trim ? trimStem(mergedPos.array as Float32Array) : (mergedPos.array as Float32Array),
+      3
+    )
+  );
 
   // normalize: center on the bounding-box midpoint, scale so the largest extent == span
   geom.computeBoundingBox();
@@ -580,42 +706,233 @@ function drawBrackets(ctx: CanvasRenderingContext2D, S: number) {
   ctx.fillText("</>", S / 2, S / 2 + S * 0.02);
 }
 
-/** Curly braces { } — a clean code glyph (like </>), rasterized from the same
- *  monospace face so it reads crisply as a point cloud. */
-function drawBraces(ctx: CanvasRenderingContext2D, S: number) {
-  ctx.font = `900 ${Math.floor(S * 0.52)}px ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace`;
+/** Data-flow diagram — many "streams" enter from the left edge, curve to the right,
+ *  and converge into THREE hub nodes stacked on the right side; a dense cluster of
+ *  binary digits (0/1) gathers at each hub (the data "lands" there), with a sparse
+ *  scatter of digits filling the rest of the right field. Drawn as a flat 2D
+ *  composition and sampled by sampleSilhouette like the other glyph shapes, so it
+ *  morphs, shimmers and recolours (brand violet/teal) exactly like every model. The
+ *  binary is suggestive dot-matrix texture, not crisp text — points, not glyphs. */
+function drawDataFlow(ctx: CanvasRenderingContext2D, S: number) {
+  ctx.fillStyle = "#fff";
+  ctx.strokeStyle = "#fff";
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+
+  // the three convergence hubs on the right (fractions of the canvas)
+  const HUBS = [
+    { x: 0.74 * S, y: 0.24 * S },
+    { x: 0.82 * S, y: 0.51 * S },
+    { x: 0.74 * S, y: 0.78 * S },
+  ];
+
+  // --- streams: enter from the left, curve right, converge into each hub ---
+  const PER_HUB = 5;
+  for (const hub of HUBS) {
+    for (let s = 0; s < PER_HUB; s++) {
+      const f = s / (PER_HUB - 1); // 0..1 across this hub's fan
+      // origins fan out down the left edge, biased toward the hub's height so the
+      // bundle reads as "many feeds aggregating" without becoming a tangle
+      const ox = (0.04 + Math.random() * 0.06) * S;
+      const oy = hub.y + (f - 0.5) * 0.5 * S + (Math.random() * 2 - 1) * 0.03 * S;
+      // ctrl 1 leaves the origin heading right; ctrl 2 approaches the hub nearly
+      // horizontal so all of a hub's streams tuck into a tight convergence point
+      const c1x = ox + (0.28 + Math.random() * 0.1) * S;
+      const c1y = oy;
+      const c2x = hub.x - (0.22 + Math.random() * 0.1) * S;
+      const c2y = hub.y + (oy - hub.y) * 0.12;
+      ctx.lineWidth = 1.3 + Math.random() * 1.0;
+      ctx.beginPath();
+      ctx.moveTo(ox, oy);
+      ctx.bezierCurveTo(c1x, c1y, c2x, c2y, hub.x, hub.y);
+      ctx.stroke();
+      // a glowing node dot part-way along each stream
+      const t = 0.5 + 0.35 * Math.random();
+      const mt = 1 - t;
+      const px = mt * mt * mt * ox + 3 * mt * mt * t * c1x + 3 * mt * t * t * c2x + t * t * t * hub.x;
+      const py = mt * mt * mt * oy + 3 * mt * mt * t * c1y + 3 * mt * t * t * c2y + t * t * t * hub.y;
+      ctx.beginPath();
+      ctx.arc(px, py, S * 0.006, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // --- binary: dense clusters at each hub + a sparse scatter across the right field ---
+  ctx.font = `700 ${Math.floor(S * 0.05)}px ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText("{ }", S / 2, S / 2 + S * 0.02);
+  const digit = () => (Math.random() < 0.5 ? "0" : "1");
+
+  // dense binary gathered at the three hubs (the data "lands" here)
+  const cStep = S * 0.046;
+  const cR = S * 0.14; // cluster radius
+  for (const hub of HUBS) {
+    for (let dx = -cR; dx <= cR; dx += cStep) {
+      for (let dy = -cR; dy <= cR; dy += cStep) {
+        // round-ish cluster, denser toward the hub centre
+        const r = Math.hypot(dx, dy) / cR;
+        if (r > 1 || Math.random() < r * 0.55) continue;
+        const jx = (Math.random() * 2 - 1) * cStep * 0.2;
+        const jy = (Math.random() * 2 - 1) * cStep * 0.2;
+        ctx.fillText(digit(), hub.x + dx + jx, hub.y + dy + jy);
+      }
+    }
+    // a bright core dot at the hub itself
+    ctx.beginPath();
+    ctx.arc(hub.x, hub.y, S * 0.016, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // sparse scatter filling the rest of the right field, so binary reads everywhere
+  const gStep = S * 0.07;
+  for (let gx = 0.46 * S; gx <= 0.96 * S; gx += gStep) {
+    for (let gy = 0.06 * S; gy <= 0.94 * S; gy += gStep) {
+      if (Math.random() < 0.7) continue; // very sparse outside the clusters
+      const jx = (Math.random() * 2 - 1) * gStep * 0.25;
+      const jy = (Math.random() * 2 - 1) * gStep * 0.25;
+      ctx.fillText(digit(), gx + jx, gy + jy);
+    }
+  }
 }
 
-/** Cog/gear — a body disc ringed by radial teeth, with a bored-out hub. The
- *  teeth are rotated rectangles laid around the rim; the hub is carved last. */
-function drawGear(ctx: CanvasRenderingContext2D, S: number) {
-  const cx = 0.5 * S;
-  const cy = 0.5 * S;
-  const rBody = 0.22 * S; // solid disc radius
-  const rTip = 0.31 * S; // outer radius at the tooth tips
-  const teeth = 9;
-  const toothW = 0.085 * S; // tangential tooth width
-  // teeth first (rotated rects reaching from just inside the body out to rTip)
-  for (let i = 0; i < teeth; i++) {
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate((i / teeth) * Math.PI * 2);
-    ctx.fillRect(-toothW / 2, -rTip, toothW, rTip - rBody + 0.04 * S);
-    ctx.restore();
+/** Cloud (procedural FALLBACK) — several overlapping spheres (lobes) forming a puffy
+ *  cloud; each lobe's SURFACE is sampled and points inside any OTHER lobe are dropped
+ *  (the union hull), so no interior dots show. The underside is flattened to a base
+ *  plane for the classic flat-bottomed cloud. Normalized so its largest extent ==
+ *  `span`. The real /models/cloud.glb (sampled via makeBrainFromMesh) replaces this
+ *  once it loads — mirrors the brain's procedural→mesh upgrade. */
+function makeCloud(n: number, span: number): Float32Array {
+  type Lobe = { x: number; y: number; z: number; r: number };
+  const lobes: Lobe[] = [
+    { x: -1.05, y: -0.02, z: 0.0, r: 0.5 },
+    { x: -0.5, y: 0.22, z: 0.12, r: 0.68 },
+    { x: 0.15, y: 0.34, z: -0.06, r: 0.8 },
+    { x: 0.8, y: 0.18, z: 0.1, r: 0.62 },
+    { x: 1.2, y: -0.02, z: 0.0, r: 0.46 },
+    { x: 0.05, y: -0.08, z: 0.18, r: 0.86 }, // big central lobe
+    { x: -0.25, y: -0.12, z: -0.22, r: 0.58 },
+  ];
+  const base = -0.12; // flatten the underside to this plane (the cloud's flat bottom)
+  let totalArea = 0;
+  for (const l of lobes) totalArea += l.r * l.r;
+  const out = new Float32Array(n * 3);
+  let count = 0;
+  let guard = 0;
+  const maxGuard = n * 60 + 10000;
+  while (count < n && guard < maxGuard) {
+    guard++;
+    // area-weighted lobe pick
+    let pickv = Math.random() * totalArea;
+    let li = 0;
+    for (; li < lobes.length - 1; li++) {
+      pickv -= lobes[li].r * lobes[li].r;
+      if (pickv <= 0) break;
+    }
+    const l = lobes[li];
+    // uniform random point on this lobe's surface
+    const u = Math.random() * 2 - 1;
+    const theta = Math.random() * Math.PI * 2;
+    const s = Math.sqrt(1 - u * u);
+    const px = l.x + l.r * s * Math.cos(theta);
+    let py = l.y + l.r * u;
+    const pz = l.z + l.r * s * Math.sin(theta);
+    // union hull: drop points strictly inside another lobe
+    let inside = false;
+    for (let j = 0; j < lobes.length; j++) {
+      if (j === li) continue;
+      const o = lobes[j];
+      const dx = px - o.x;
+      const dy = py - o.y;
+      const dz = pz - o.z;
+      if (dx * dx + dy * dy + dz * dz < o.r * o.r * 0.94) {
+        inside = true;
+        break;
+      }
+    }
+    if (inside) continue;
+    if (py < base) py = base; // flatten the underside
+    out[count * 3] = px;
+    out[count * 3 + 1] = py;
+    out[count * 3 + 2] = pz;
+    count++;
   }
-  // body disc
-  ctx.beginPath();
-  ctx.arc(cx, cy, rBody, 0, Math.PI * 2);
-  ctx.fill();
-  // hub bore (carve)
-  ctx.globalCompositeOperation = "destination-out";
-  ctx.beginPath();
-  ctx.arc(cx, cy, 0.085 * S, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.globalCompositeOperation = "source-over";
+  // wrap-fill if undersampled (rare) so no zeros remain at the origin
+  for (let i = count; i < n; i++) {
+    const src = (count > 0 ? i % count : 0) * 3;
+    out[i * 3] = out[src];
+    out[i * 3 + 1] = out[src + 1];
+    out[i * 3 + 2] = out[src + 2];
+  }
+  // normalize: center on the bounding-box midpoint, scale so largest extent == span
+  let mnx = Infinity, mny = Infinity, mnz = Infinity;
+  let mxx = -Infinity, mxy = -Infinity, mxz = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const x = out[i * 3], y = out[i * 3 + 1], z = out[i * 3 + 2];
+    if (x < mnx) mnx = x; if (x > mxx) mxx = x;
+    if (y < mny) mny = y; if (y > mxy) mxy = y;
+    if (z < mnz) mnz = z; if (z > mxz) mxz = z;
+  }
+  const cx = (mnx + mxx) / 2, cy = (mny + mxy) / 2, cz = (mnz + mxz) / 2;
+  const ext = Math.max(mxx - mnx, mxy - mny, mxz - mnz) || 1;
+  const sc = span / ext;
+  for (let i = 0; i < n; i++) {
+    out[i * 3] = (out[i * 3] - cx) * sc;
+    out[i * 3 + 1] = (out[i * 3 + 1] - cy) * sc;
+    out[i * 3 + 2] = (out[i * 3 + 2] - cz) * sc;
+  }
+  return out;
+}
+
+/** Build one ORTHOGONAL (right-angle) connection trail of CONN_SAMPLES dots: it
+ *  leaves the cloud's edge along one axis, then bends 90° to reach the node — a
+ *  circuit-trace look (like the reference image), not a straight radial spread.
+ *  Side nodes exit horizontally then turn vertical; top/bottom nodes exit vertically
+ *  then turn horizontal. Points are distributed by segment length so the dot spacing
+ *  is even across the bend. */
+function buildElbow(nx: number, ny: number, nz: number, halfW: number, halfH: number): Float32Array {
+  const sgnx = nx >= 0 ? 1 : -1;
+  const sgny = ny >= 0 ? 1 : -1;
+  let p0: [number, number], p1: [number, number]; // start (cloud core), corner
+  const p2: [number, number] = [nx, ny]; // node
+  // Anchor the START deep in the cloud's DENSE CORE (near the origin), NOT on a
+  // presumed bounding box. makeCloud/cloud.glb centre on the bbox midpoint, but the
+  // lobes are puffy on top and flat on the bottom — so the body mass sits below the
+  // origin and the upper region is sparse. A start pinned to the box edge floats
+  // free of the body for off-axis nodes. Starting in the core and letting the trail
+  // pass OUT through the diffuse edge guarantees every trace emerges from the cloud;
+  // the visible right-angle elbow still forms outside.
+  if (Math.abs(nx) >= Math.abs(ny)) {
+    // exit toward the SIDE: leave the core ~horizontally, run to the node's x, turn in.
+    p0 = [sgnx * halfW * 0.18, sgny * halfH * 0.12];
+    p1 = [nx, sgny * halfH * 0.12];
+  } else {
+    // exit toward the TOP/BOTTOM: leave the core ~vertically, run to the node's y, turn in.
+    p0 = [sgnx * halfW * 0.12, sgny * halfH * 0.18];
+    p1 = [sgnx * halfW * 0.12, ny];
+  }
+  const l1 = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+  const l2 = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]);
+  const total = l1 + l2 || 1;
+  const out = new Float32Array(CONN_SAMPLES * 3);
+  for (let i = 0; i < CONN_SAMPLES; i++) {
+    const t = i / (CONN_SAMPLES - 1); // 0 (core) → 1 (node) along the whole path
+    const d = t * total; // distance along the path
+    let x: number, y: number;
+    if (d <= l1) {
+      const u = l1 > 0 ? d / l1 : 0;
+      x = p0[0] + (p1[0] - p0[0]) * u;
+      y = p0[1] + (p1[1] - p0[1]) * u;
+    } else {
+      const u = l2 > 0 ? (d - l1) / l2 : 0;
+      x = p1[0] + (p2[0] - p1[0]) * u;
+      y = p1[1] + (p2[1] - p1[1]) * u;
+    }
+    out[i * 3] = x;
+    out[i * 3 + 1] = y;
+    out[i * 3 + 2] = nz; // constant depth — the whole service layer is coplanar, so a
+                         // leg never changes depth and stays axis-aligned on screen
+  }
+  return out;
 }
 
 /** Procedural brain silhouette — the FALLBACK only. The real Hero/About brain is
@@ -802,6 +1119,9 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
   const brainTarget = useRef<Float32Array | null>(null);
   // same idea for the dense brain-fill buffer (see brainFillBase below)
   const brainFillTarget = useRef<Float32Array | null>(null);
+  // and for the cloud body — sampled from /models/cloud.glb once it resolves, eased
+  // into shapes.cloud (procedural makeCloud stands in until then / on failure).
+  const cloudTarget = useRef<Float32Array | null>(null);
   // force a render after the async brain load lands while in reduced-motion
   // ("demand" frameloop only renders on request)
   const invalidate = useThree((s) => s.invalidate);
@@ -812,8 +1132,8 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     const s = {
       // (draw, scale, inflate, wrinkle) — inflate puffs the flat outline into 3D
       brackets: sampleSilhouette(drawBrackets, POINT_COUNT, 4.0 * MODEL_SCALE, 0.5 * MODEL_SCALE),
-      gear: sampleSilhouette(drawGear, POINT_COUNT, 4.0 * MODEL_SCALE, 0.7 * MODEL_SCALE),
-      braces: sampleSilhouette(drawBraces, POINT_COUNT, 4.0 * MODEL_SCALE, 0.5 * MODEL_SCALE),
+      cloud: makeCloud(POINT_COUNT, CLOUD_SPAN),
+      dataflow: sampleSilhouette(drawDataFlow, POINT_COUNT, 3.2 * MODEL_SCALE, 0.25 * MODEL_SCALE),
       // Hero/About brain — a procedural silhouette with gyri-like wrinkle, used
       // only until /models/brain.glb loads and re-samples this buffer in place
       // (see the GLTF effect + the eased swap in useFrame).
@@ -974,6 +1294,33 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     };
   }, [shapes, animate, invalidate, brainFillBase, brainFillPositions]);
 
+  // Load the cloud mesh and re-sample shapes.cloud off its surface — mirrors the
+  // brain loader above (procedural makeCloud stands in until this resolves, and stays
+  // if it fails / the asset is absent). trimStem is bypassed (it's brain-specific).
+  useEffect(() => {
+    let cancelled = false;
+    new GLTFLoader()
+      .loadAsync("/models/cloud.glb")
+      .then((gltf) => {
+        if (cancelled) return;
+        const pts = makeBrainFromMesh(gltf.scene, POINT_COUNT, CLOUD_SPAN, false);
+        if (pts.length === 0) return; // no meshes — keep the procedural cloud
+        centerY(pts);
+        if (animate) {
+          cloudTarget.current = pts;
+        } else {
+          shapes.cloud.set(pts);
+          invalidate();
+        }
+      })
+      .catch(() => {
+        /* keep the procedural fallback cloud */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [shapes, animate, invalidate]);
+
   // soft round sprite shared by both clouds (clips the default square points)
   const dot = useMemo(makeDotTexture, []);
   useEffect(() => () => dot?.dispose(), [dot]);
@@ -1026,6 +1373,210 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
   }, []);
   const brainFillMaterial = useMemo(() => makePointShaderMaterial(dot, dark), [dot, dark]);
   useEffect(() => () => brainFillMaterial.dispose(), [brainFillMaterial]);
+
+  // ---- globe data arcs (Contact globe only) ----
+  // Great-circle trails Alappuzha → hubs with bright travelling heads. Like the
+  // ocean dots they fade in with globeness and gate off during the scatter; the
+  // far-hemisphere portion hides via the shared front/back shader (uGlobeness). They
+  // live in the `inner` group, so they ride the globe's tilt. Trails are static
+  // (set once); only opacity (per-frame uniform) and the heads animate.
+  const arcRef = useRef<THREE.Points>(null);
+  const headsRef = useRef<THREE.Points>(null);
+  const arcs = useMemo(
+    () => ARC_HUBS.map((h) => buildArc(ARC_SOURCE.lon, ARC_SOURCE.lat, h.lon, h.lat, GLOBE_RADIUS)),
+    []
+  );
+  const arcPositions = useMemo(() => {
+    const a = new Float32Array(arcs.length * ARC_SAMPLES * 3);
+    arcs.forEach((arc, k) => a.set(arc, k * ARC_SAMPLES * 3));
+    return a;
+  }, [arcs]);
+  const arcColors = useMemo(() => {
+    // violet → teal gradient along each arc, matching the site palette
+    const a = new Float32Array(arcs.length * ARC_SAMPLES * 3);
+    const cv = new THREE.Color("#8052ff");
+    const ct = new THREE.Color("#46c2a6");
+    const c = new THREE.Color();
+    for (let k = 0; k < arcs.length; k++) {
+      for (let i = 0; i < ARC_SAMPLES; i++) {
+        c.copy(cv).lerp(ct, i / (ARC_SAMPLES - 1));
+        const o = (k * ARC_SAMPLES + i) * 3;
+        a[o] = c.r;
+        a[o + 1] = c.g;
+        a[o + 2] = c.b;
+      }
+    }
+    return a;
+  }, [arcs]);
+  const arcSizes = useMemo(() => {
+    const a = new Float32Array(arcs.length * ARC_SAMPLES);
+    a.fill(0.85);
+    return a;
+  }, [arcs]);
+  const arcPhases = useMemo(() => {
+    const a = new Float32Array(arcs.length * ARC_SAMPLES);
+    for (let i = 0; i < a.length; i++) a[i] = Math.random() * Math.PI * 2;
+    return a;
+  }, [arcs]);
+  // one travelling head per arc, recycled with a fresh speed at the far end
+  const arcHeads = useMemo(
+    () => arcs.map((_, i) => ({ arc: i, t: Math.random(), speed: 0.22 + Math.random() * 0.22 })),
+    [arcs]
+  );
+  const headPositions = useMemo(() => new Float32Array(arcHeads.length * 3), [arcHeads]);
+  const headColors = useMemo(() => {
+    const a = new Float32Array(arcHeads.length * 3);
+    const c = new THREE.Color("#f3f1ff"); // near-white lavender (the bright beam head)
+    for (let i = 0; i < arcHeads.length; i++) {
+      a[i * 3] = c.r;
+      a[i * 3 + 1] = c.g;
+      a[i * 3 + 2] = c.b;
+    }
+    return a;
+  }, [arcHeads]);
+  const headSizes = useMemo(() => {
+    const a = new Float32Array(arcHeads.length);
+    a.fill(2.4);
+    return a;
+  }, [arcHeads]);
+  const headPhases = useMemo(() => new Float32Array(arcHeads.length), [arcHeads]);
+  const arcMaterial = useMemo(() => makePointShaderMaterial(dot, dark), [dot, dark]);
+  useEffect(() => () => arcMaterial.dispose(), [arcMaterial]);
+  const headMaterial = useMemo(() => makePointShaderMaterial(dot, dark), [dot, dark]);
+  useEffect(() => () => headMaterial.dispose(), [headMaterial]);
+
+  // ---- cloud connected services (Skills cloud only) ----
+  // Service nodes ringed around the cloud, fed by dotted connection trails with a
+  // bright packet flowing out along each. Mirrors the globe arcs: separate layers in
+  // the `inner` group, faded in by `cloudness` and off during the scatter. Trails +
+  // nodes are static; only the packets animate.
+  const connRef = useRef<THREE.Points>(null);
+  const nodesRef = useRef<THREE.Points>(null);
+  const pktRef = useRef<THREE.Points>(null);
+  const iconRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const cloudNodes = useMemo(() => {
+    // an evenly-spaced elliptical ring (wider than tall, like the cloud), held
+    // perfectly FLAT (z = 0). The whole service layer is one camera-facing plane, so
+    // every connector leg projects as a true horizontal / vertical (no depth slant).
+    // Sized so each node + its icon stays clear of the cloud and on screen.
+    const R = CLOUD_SPAN * 0.78;
+    const arr: [number, number, number][] = [];
+    for (let i = 0; i < CLOUD_NODE_COUNT; i++) {
+      const a = (i / CLOUD_NODE_COUNT) * Math.PI * 2 + 0.35;
+      arr.push([
+        Math.cos(a) * R * 0.95 + NODE_OFFSET[i][0],
+        Math.sin(a) * R * 0.62 + NODE_OFFSET[i][1],
+        0,
+      ]);
+    }
+    return arr;
+  }, []);
+  const conns = useMemo(
+    () =>
+      cloudNodes.map((nd, i) => {
+        const ox = NODE_OFFSET[i][0];
+        const oy = NODE_OFFSET[i][1];
+        // build the elbow from the UN-nudged node (so its in-core origin is computed
+        // correctly), then translate the whole trace by the node's offset — origin and
+        // endpoint shift with the icon, and the pure shift keeps every leg perpendicular.
+        const e = buildElbow(nd[0] - ox, nd[1] - oy, nd[2], CLOUD_HALF_W, CLOUD_HALF_H);
+        for (let k = 0; k < e.length; k += 3) {
+          e[k] += ox;
+          e[k + 1] += oy;
+        }
+        return e;
+      }),
+    [cloudNodes]
+  );
+  const connPositions = useMemo(() => {
+    const a = new Float32Array(conns.length * CONN_SAMPLES * 3);
+    conns.forEach((c, k) => a.set(c, k * CONN_SAMPLES * 3));
+    return a;
+  }, [conns]);
+  const connColors = useMemo(() => {
+    // violet → teal gradient out toward each node, matching the arcs
+    const a = new Float32Array(conns.length * CONN_SAMPLES * 3);
+    const cv = new THREE.Color("#8052ff");
+    const ct = new THREE.Color("#46c2a6");
+    const c = new THREE.Color();
+    for (let k = 0; k < conns.length; k++) {
+      for (let i = 0; i < CONN_SAMPLES; i++) {
+        c.copy(cv).lerp(ct, i / (CONN_SAMPLES - 1));
+        const o = (k * CONN_SAMPLES + i) * 3;
+        a[o] = c.r;
+        a[o + 1] = c.g;
+        a[o + 2] = c.b;
+      }
+    }
+    return a;
+  }, [conns]);
+  const connSizes = useMemo(() => {
+    const a = new Float32Array(conns.length * CONN_SAMPLES);
+    a.fill(1.3);
+    return a;
+  }, [conns]);
+  const connPhases = useMemo(() => {
+    const a = new Float32Array(conns.length * CONN_SAMPLES);
+    for (let i = 0; i < a.length; i++) a[i] = Math.random() * Math.PI * 2;
+    return a;
+  }, [conns]);
+  const nodePositions = useMemo(() => {
+    const a = new Float32Array(cloudNodes.length * 3);
+    cloudNodes.forEach((nd, k) => {
+      a[k * 3] = nd[0];
+      a[k * 3 + 1] = nd[1];
+      a[k * 3 + 2] = nd[2];
+    });
+    return a;
+  }, [cloudNodes]);
+  const nodeColors = useMemo(() => {
+    const a = new Float32Array(cloudNodes.length * 3);
+    const c = new THREE.Color("#46c2a6").lerp(new THREE.Color("#f3f1ff"), 0.3);
+    for (let i = 0; i < cloudNodes.length; i++) {
+      a[i * 3] = c.r;
+      a[i * 3 + 1] = c.g;
+      a[i * 3 + 2] = c.b;
+    }
+    return a;
+  }, [cloudNodes]);
+  const nodeSizes = useMemo(() => {
+    const a = new Float32Array(cloudNodes.length);
+    a.fill(4); // a soft glow behind each icon (the icon itself is the focal mark)
+    return a;
+  }, [cloudNodes]);
+  const nodePhases = useMemo(() => {
+    const a = new Float32Array(cloudNodes.length);
+    for (let i = 0; i < cloudNodes.length; i++) a[i] = Math.random() * Math.PI * 2;
+    return a;
+  }, [cloudNodes]);
+  // one packet per connection, flowing cloud → node, recycled at the far end
+  const cloudPackets = useMemo(
+    () => conns.map((_, i) => ({ conn: i, t: Math.random(), speed: 0.3 + Math.random() * 0.3 })),
+    [conns]
+  );
+  const pktPositions = useMemo(() => new Float32Array(cloudPackets.length * 3), [cloudPackets]);
+  const pktColors = useMemo(() => {
+    const a = new Float32Array(cloudPackets.length * 3);
+    const c = new THREE.Color("#f3f1ff");
+    for (let i = 0; i < cloudPackets.length; i++) {
+      a[i * 3] = c.r;
+      a[i * 3 + 1] = c.g;
+      a[i * 3 + 2] = c.b;
+    }
+    return a;
+  }, [cloudPackets]);
+  const pktSizes = useMemo(() => {
+    const a = new Float32Array(cloudPackets.length);
+    a.fill(3);
+    return a;
+  }, [cloudPackets]);
+  const pktPhases = useMemo(() => new Float32Array(cloudPackets.length), [cloudPackets]);
+  const connMaterial = useMemo(() => makePointShaderMaterial(dot, dark), [dot, dark]);
+  useEffect(() => () => connMaterial.dispose(), [connMaterial]);
+  const nodeMaterial = useMemo(() => makePointShaderMaterial(dot, dark), [dot, dark]);
+  useEffect(() => () => nodeMaterial.dispose(), [nodeMaterial]);
+  const pktMaterial = useMemo(() => makePointShaderMaterial(dot, dark), [dot, dark]);
+  useEffect(() => () => pktMaterial.dispose(), [pktMaterial]);
 
   // ---- starfield (always on) ----
   // Laid out exactly like the deployed (main-branch) hero point cloud: a soft
@@ -1215,6 +1766,23 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
         brainTarget.current = null;
       }
     }
+    // same eased swap for the cloud body once /models/cloud.glb resolves
+    if (cloudTarget.current) {
+      const t = cloudTarget.current;
+      const src = shapes.cloud;
+      const e = Math.min(1, delta * 2);
+      let maxd = 0;
+      for (let j = 0; j < src.length; j++) {
+        const d = t[j] - src[j];
+        src[j] += d * e;
+        const ad = d < 0 ? -d : d;
+        if (ad > maxd) maxd = ad;
+      }
+      if (maxd < 0.002) {
+        src.set(t);
+        cloudTarget.current = null;
+      }
+    }
     // same eased swap for the dense brain fill; it isn't recomputed every frame, so
     // push the eased base into the live buffer here while the swap is in flight.
     if (brainFillTarget.current && brainFillRef.current) {
@@ -1283,6 +1851,16 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     // brain-fill opacity and shrinks the morph cloud's points to match the fill.
     const brainness =
       (ORDER[i] === "brain" ? 1 - mf : 0) + (ORDER[next] === "brain" ? mf : 0);
+    // how much of the CURRENT blended shape is the cloud (0..1) — drives the
+    // connection / node / packet layer opacity (invisible off the cloud stage).
+    const cloudness =
+      (ORDER[i] === "cloud" ? 1 - mf : 0) + (ORDER[next] === "cloud" ? mf : 0);
+    // how much of the CURRENT blended shape is the data-flow section (0..1). That
+    // section renders a dedicated SVG diagram (see DataFlowDiagram), so the particle
+    // cloud fades out as it docks there and fades back in as it scatters away — the
+    // two crossfade instead of overlapping.
+    const dataflowness =
+      (ORDER[i] === "dataflow" ? 1 - mf : 0) + (ORDER[next] === "dataflow" ? mf : 0);
 
     // publish the model's transition state so content sections wait for it to
     // settle before revealing (see Reveal). Settled = entry assembly done AND
@@ -1533,6 +2111,101 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
       brainFillHovered.current = false;
     }
 
+    // globe data arcs — faint great-circle trails + bright travelling heads, only on
+    // the Contact globe. Opacity gates on globeness (invisible off the globe) and on
+    // (1 - env) so they vanish during the scatter; uGlobeness hides the far-hemisphere
+    // portion. The trails are static; only the heads move (a tiny per-arc loop, run
+    // only while the globe is on screen).
+    const ar = arcMaterial.uniforms;
+    ar.uSize.value = (dark ? 0.03 : 0.028) * state.gl.getPixelRatio() * (1 + 0.3 * globeness);
+    ar.uScale.value = state.size.height * 0.5;
+    ar.uOpacity.value = (dark ? 0.78 : 0.68) * globeness * (1 - env) * entry;
+    ar.uTime.value = state.clock.elapsedTime;
+    ar.uShimmer.value = animate ? 0.4 : 0;
+    ar.uGlobeness.value = globeness;
+    const hd = headMaterial.uniforms;
+    hd.uSize.value = (dark ? 0.05 : 0.045) * state.gl.getPixelRatio();
+    hd.uScale.value = state.size.height * 0.5;
+    hd.uOpacity.value = (dark ? 1 : 0.95) * globeness * (1 - env) * entry;
+    hd.uTime.value = state.clock.elapsedTime;
+    hd.uShimmer.value = 0;
+    hd.uGlobeness.value = globeness;
+    if (headsRef.current && globeness > 0.001) {
+      for (let h = 0; h < arcHeads.length; h++) {
+        const head = arcHeads[h];
+        if (animate) {
+          head.t += delta * head.speed;
+          if (head.t >= 1) {
+            head.t = 0;
+            head.speed = 0.22 + Math.random() * 0.22;
+          }
+        }
+        const arc = arcs[head.arc];
+        const f = head.t * (ARC_SAMPLES - 1);
+        const i0 = Math.min(ARC_SAMPLES - 1, Math.floor(f));
+        const i1 = Math.min(ARC_SAMPLES - 1, i0 + 1);
+        const fr = f - i0;
+        headPositions[h * 3] = arc[i0 * 3] + (arc[i1 * 3] - arc[i0 * 3]) * fr;
+        headPositions[h * 3 + 1] = arc[i0 * 3 + 1] + (arc[i1 * 3 + 1] - arc[i0 * 3 + 1]) * fr;
+        headPositions[h * 3 + 2] = arc[i0 * 3 + 2] + (arc[i1 * 3 + 2] - arc[i0 * 3 + 2]) * fr;
+      }
+      (headsRef.current.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+    }
+
+    // cloud connected services — trails + nodes + flowing packets, only on the Skills
+    // cloud. Opacity gates on cloudness and (1 - env) so they fade in on settle and
+    // vanish during the scatter. Trails/nodes are static; packets ride their trail
+    // (a tiny per-packet loop, run only while the cloud is on screen).
+    const cn = connMaterial.uniforms;
+    cn.uSize.value = (dark ? 0.045 : 0.042) * state.gl.getPixelRatio();
+    cn.uScale.value = state.size.height * 0.5;
+    cn.uOpacity.value = (dark ? 0.95 : 0.85) * cloudness * (1 - env) * entry;
+    cn.uTime.value = state.clock.elapsedTime;
+    cn.uShimmer.value = animate ? 0.25 : 0; // steadier so the lines read as lines
+    cn.uGlobeness.value = 0;
+    const nm = nodeMaterial.uniforms;
+    nm.uSize.value = (dark ? 0.09 : 0.08) * state.gl.getPixelRatio();
+    nm.uScale.value = state.size.height * 0.5;
+    nm.uOpacity.value = (dark ? 1 : 0.95) * cloudness * (1 - env) * entry;
+    nm.uTime.value = state.clock.elapsedTime;
+    nm.uShimmer.value = animate ? 0.5 : 0;
+    nm.uGlobeness.value = 0;
+    const pk = pktMaterial.uniforms;
+    pk.uSize.value = (dark ? 0.06 : 0.055) * state.gl.getPixelRatio();
+    pk.uScale.value = state.size.height * 0.5;
+    pk.uOpacity.value = (dark ? 1 : 0.95) * cloudness * (1 - env) * entry;
+    pk.uTime.value = state.clock.elapsedTime;
+    pk.uShimmer.value = 0;
+    pk.uGlobeness.value = 0;
+    if (pktRef.current && cloudness > 0.001) {
+      for (let q = 0; q < cloudPackets.length; q++) {
+        const p = cloudPackets[q];
+        if (animate) {
+          p.t += delta * p.speed;
+          if (p.t >= 1) {
+            p.t = 0;
+            p.speed = 0.3 + Math.random() * 0.3;
+          }
+        }
+        const c = conns[p.conn];
+        const f = p.t * (CONN_SAMPLES - 1);
+        const i0 = Math.min(CONN_SAMPLES - 1, Math.floor(f));
+        const i1 = Math.min(CONN_SAMPLES - 1, i0 + 1);
+        const fr = f - i0;
+        pktPositions[q * 3] = c[i0 * 3] + (c[i1 * 3] - c[i0 * 3]) * fr;
+        pktPositions[q * 3 + 1] = c[i0 * 3 + 1] + (c[i1 * 3 + 1] - c[i0 * 3 + 1]) * fr;
+        pktPositions[q * 3 + 2] = c[i0 * 3 + 2] + (c[i1 * 3 + 2] - c[i0 * 3 + 2]) * fr;
+      }
+      (pktRef.current.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+    }
+    // fade the service ICONS (DOM via <Html>) with the cloud stage — same gate as the
+    // connection/node/packet layers. Imperative DOM writes (no React re-render).
+    const iconOp = cloudness * (1 - env) * entry;
+    for (let q = 0; q < iconRefs.current.length; q++) {
+      const el = iconRefs.current[q];
+      if (el) el.style.opacity = iconOp < 0.01 ? "0" : iconOp.toFixed(3);
+    }
+
     // drive the morph cloud's material. On the GLOBE its (sparse) land dots ease to
     // the dense land-fill style — size → 0.032, opacity, shimmer → 0.5 — so they
     // blend into the dense fill rather than reading as a second, chunkier layer. The
@@ -1549,7 +2222,8 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     mu.uOpacity.value =
       lerp(dark ? 0.95 : 0.85, dark ? 0.95 : 0.9, globeness) *
       entry *
-      (mobile ? lerp(0.55, 0.6, globeness) : 1);
+      (mobile ? lerp(0.55, 0.6, globeness) : 1) *
+      (1 - dataflowness); // hand the stage to the SVG data-flow diagram at that section
     mu.uTime.value = state.clock.elapsedTime;
     mu.uShimmer.value = animate ? lerp(1, 0.5, globeness) : 0;
     mu.uGlobeness.value = globeness;
@@ -1657,6 +2331,87 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
               <bufferAttribute attach="attributes-aPhase" args={[landFillPhases, 1]} />
             </bufferGeometry>
           </points>
+          {/* globe data arcs — faint great-circle trails from Alappuzha (opacity
+              gated by globeness; invisible off the globe). Inside `inner`, so they
+              tilt with the globe. */}
+          <points ref={arcRef} material={arcMaterial} frustumCulled={false}>
+            <bufferGeometry>
+              <bufferAttribute attach="attributes-position" args={[arcPositions, 3]} />
+              <bufferAttribute attach="attributes-aColor" args={[arcColors, 3]} />
+              <bufferAttribute attach="attributes-aSize" args={[arcSizes, 1]} />
+              <bufferAttribute attach="attributes-aPhase" args={[arcPhases, 1]} />
+            </bufferGeometry>
+          </points>
+          {/* bright travelling heads riding each arc (position animated in useFrame) */}
+          <points ref={headsRef} material={headMaterial} frustumCulled={false}>
+            <bufferGeometry>
+              <bufferAttribute attach="attributes-position" args={[headPositions, 3]} />
+              <bufferAttribute attach="attributes-aColor" args={[headColors, 3]} />
+              <bufferAttribute attach="attributes-aSize" args={[headSizes, 1]} />
+              <bufferAttribute attach="attributes-aPhase" args={[headPhases, 1]} />
+            </bufferGeometry>
+          </points>
+        </group>
+        {/* cloud connected services — trails + node glows + packets + icons. Kept
+            OUTSIDE the tilting `inner` group as a FLAT, camera-facing layer (every
+            point at z = 0) so each right-angle connector stays perfectly perpendicular
+            on screen AT ALL TIMES — `inner`'s cursor tilt would otherwise foreshorten
+            the legs into slants. Still a child of `outer`, so it docks / scales with
+            the cloud (cloudness gates its opacity in useFrame; off the cloud stage it
+            fades to invisible). */}
+        <group>
+          <points ref={connRef} material={connMaterial} frustumCulled={false}>
+            <bufferGeometry>
+              <bufferAttribute attach="attributes-position" args={[connPositions, 3]} />
+              <bufferAttribute attach="attributes-aColor" args={[connColors, 3]} />
+              <bufferAttribute attach="attributes-aSize" args={[connSizes, 1]} />
+              <bufferAttribute attach="attributes-aPhase" args={[connPhases, 1]} />
+            </bufferGeometry>
+          </points>
+          {/* glowing service nodes at the end of each trail */}
+          <points ref={nodesRef} material={nodeMaterial} frustumCulled={false}>
+            <bufferGeometry>
+              <bufferAttribute attach="attributes-position" args={[nodePositions, 3]} />
+              <bufferAttribute attach="attributes-aColor" args={[nodeColors, 3]} />
+              <bufferAttribute attach="attributes-aSize" args={[nodeSizes, 1]} />
+              <bufferAttribute attach="attributes-aPhase" args={[nodePhases, 1]} />
+            </bufferGeometry>
+          </points>
+          {/* bright packets flowing cloud → node (position animated in useFrame) */}
+          <points ref={pktRef} material={pktMaterial} frustumCulled={false}>
+            <bufferGeometry>
+              <bufferAttribute attach="attributes-position" args={[pktPositions, 3]} />
+              <bufferAttribute attach="attributes-aColor" args={[pktColors, 3]} />
+              <bufferAttribute attach="attributes-aSize" args={[pktSizes, 1]} />
+              <bufferAttribute attach="attributes-aPhase" args={[pktPhases, 1]} />
+            </bufferGeometry>
+          </points>
+          {/* real service ICONS (lucide) at each node, projected to screen by drei
+              <Html>. In the flat service group, so they dock with the cloud (no tilt)
+              and line up with the perpendicular trails. Opacity is driven per frame
+              from `cloudness` (see useFrame) so they fade with the stage. Flat,
+              pointer-events-none, behind page content like the rest of the backdrop. */}
+          {cloudNodes.map((nd, i) => {
+            const Icon = SERVICE_ICONS[i % SERVICE_ICONS.length];
+            return (
+              <Html key={i} position={nd} center zIndexRange={[5, 0]} style={{ pointerEvents: "none" }}>
+                <div
+                  ref={(el) => {
+                    iconRefs.current[i] = el;
+                  }}
+                  style={{
+                    opacity: 0,
+                    color: dark ? "#8ff0dd" : "#0f766e",
+                    filter: dark ? "drop-shadow(0 0 7px rgba(70,194,166,0.85))" : "none",
+                    display: "grid",
+                    placeItems: "center",
+                  }}
+                >
+                  <Icon size={26} strokeWidth={1.75} aria-hidden="true" />
+                </div>
+              </Html>
+            );
+          })}
         </group>
       </group>
     </>

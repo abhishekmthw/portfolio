@@ -15,6 +15,7 @@ import { SectionHeading } from "@/components/section-heading";
 import { Reveal } from "@/components/motion/reveal";
 import { Parallax } from "@/components/motion/parallax";
 import { HoverCard } from "@/components/motion/hover-card";
+import { DataFlowDiagram } from "@/components/data-flow-diagram";
 import { experience, type Experience as Job } from "@/data/experience";
 
 /**
@@ -49,7 +50,8 @@ export function Experience() {
 
   return (
     <section id="experience" className="relative scroll-mt-24 px-6 py-24 sm:px-10 lg:px-16 lg:py-36">
-      <div className="w-full lg:ml-auto lg:max-w-[40rem]">
+      <DataFlowDiagram />
+      <div className="relative z-10 w-full lg:ml-auto lg:max-w-[40rem]">
       <SectionHeading
         eyebrow="experience"
         title="Where I&rsquo;ve worked."

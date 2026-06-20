@@ -22,7 +22,7 @@ export default function HomePage() {
   return (
     <div className="relative min-h-screen overflow-x-clip">
       {/* The morphing particle constellation IS the backdrop — one fixed,
-          page-spanning layer that morphs brain → gear → { } → </> → globe across scroll. */}
+          page-spanning layer that morphs brain → cloud → hexagon → </> → globe across scroll. */}
       <ConstellationBackdrop />
       <Navbar />
       <main>
