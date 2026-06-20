@@ -96,16 +96,17 @@ const GLOBE_RADIUS = 1.5 * MODEL_SCALE;
 // without overflowing the viewport. Raise/lower to taste.
 const HERO_SCALE = 1.5;
 
-// Hover "lens": every point within HOVER_RADIUS (cloud-local units; the model
-// spans ~±2.7 after MODEL_SCALE) of the cursor swells to (1 + HOVER_GROW)× its
-// base size and is parted outward by HOVER_SPREAD to make room for the larger
-// dots. Strongest right under the pointer, easing to zero at the rim. The cursor
-// is projected onto the shape's front-surface depth (see refZ in useFrame) so the
-// magnified patch tracks the pointer even on the off-centre, z-offset globe.
-const HOVER_RADIUS = 1.3;
+// Hover "lens" (the dala.ai feel): every point within HOVER_RADIUS (cloud-local
+// units; the model spans ~±2.7 after MODEL_SCALE) of the cursor grows in SIZE —
+// biggest right under the pointer (1 + HOVER_GROW)×, smoothly shrinking back to
+// its base size at the rim. Pure size, NO positional displacement, so there is no
+// void: the triangles simply swell toward the cursor and ease down with distance.
+// The cursor is projected onto the shape's front-surface depth (see refZ in
+// useFrame) so the magnified patch tracks the pointer even on the off-centre,
+// z-offset globe.
+const HOVER_RADIUS = 0.85; // tight — only the patch right under the cursor reacts
 const HOVER_R2 = HOVER_RADIUS * HOVER_RADIUS;
-const HOVER_GROW = 0.2;
-const HOVER_SPREAD = 0.1;
+const HOVER_GROW = 1.9; // peak size boost at the cursor (×(1+this)); smooth falloff to the rim
 
 // Slow per-particle shimmer: each point's brightness drifts between SHIMMER_MIN
 // and full on its own phase, so the field gently blinks darker/brighter instead
@@ -959,26 +960,44 @@ function drawBrain(ctx: CanvasRenderingContext2D, S: number) {
 
 // ---------------------------------------------------------------- sprite
 /**
- * A soft round sprite (radial alpha) shared by every point cloud. Raw
- * THREE.PointsMaterial draws SQUARE points; mapping this texture as the
- * material's alpha clips each quad to a feathered disc — so the stars and the
- * morphing model read as round glints rather than little squares. The white
- * fill is multiplied by each point's vertex color, so the palette is preserved.
+ * A soft TRIANGLE sprite shared by every point cloud (the dala.craftedbygc.com
+ * look). Raw THREE.PointsMaterial draws SQUARE points; mapping this texture as
+ * the material's alpha clips each quad to a feathered triangle — so the stars
+ * and the morphing model read as little triangular glints rather than discs. The
+ * shaders rotate gl_PointCoord per particle (by aPhase), so each triangle sits
+ * at its own angle; the texture is drawn well inside the canvas with a fully
+ * transparent margin so those rotated corners sample the empty border (clamp to
+ * edge) and never smear. The white fill is multiplied by each point's vertex
+ * color, so the palette is preserved.
  */
-function makeDotTexture(): THREE.Texture | null {
+function makeTriangleTexture(): THREE.Texture | null {
   if (typeof document === "undefined") return null;
   const S = 64;
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = S;
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
-  const g = ctx.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
-  g.addColorStop(0.0, "rgba(255,255,255,1)");
-  g.addColorStop(0.45, "rgba(255,255,255,0.85)");
-  g.addColorStop(0.75, "rgba(255,255,255,0.25)");
-  g.addColorStop(1.0, "rgba(255,255,255,0)");
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, S, S);
+  const cx = S / 2;
+  const cy = S / 2;
+  // equilateral triangle inside a circumcircle of radius R, centred on the
+  // canvas so the centroid is the rotation pivot. R = 0.38·S keeps a ~6px
+  // transparent margin (plus room for the feather) on every side.
+  const R = S * 0.38;
+  const apex = (a: number) => [cx + R * Math.cos(a), cy + R * Math.sin(a)] as const;
+  const [x0, y0] = apex(-Math.PI / 2); // top vertex
+  const [x1, y1] = apex(-Math.PI / 2 + (2 * Math.PI) / 3); // bottom-right
+  const [x2, y2] = apex(-Math.PI / 2 + (4 * Math.PI) / 3); // bottom-left
+  ctx.clearRect(0, 0, S, S);
+  // soft feathered edge so it reads as a glint, not a hard polygon
+  ctx.shadowColor = "rgba(255,255,255,0.9)";
+  ctx.shadowBlur = 3;
+  ctx.fillStyle = "rgba(255,255,255,1)";
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.closePath();
+  ctx.fill();
   const tex = new THREE.CanvasTexture(canvas);
   tex.needsUpdate = true;
   return tex;
@@ -1033,7 +1052,11 @@ const POINT_VERTEX_SHADER = `
   uniform float uTintAmount;
   varying vec3 vColor;
   varying float vFront;
+  varying float vAngle;
   void main() {
+    // per-particle triangle rotation — reuse the random aPhase so every triangle
+    // sits at its own fixed angle (the fragment shader rotates gl_PointCoord by it).
+    vAngle = aPhase;
     // slow per-particle brightness drift (per-point phase + speed jitter)
     float spd = ${SHIMMER_FREQ.toFixed(3)} * (0.6 + 0.8 * fract(aPhase * 0.31831));
     float s = ${SHIMMER_MIN.toFixed(3)} + ${(1 - SHIMMER_MIN).toFixed(3)} * (0.5 + 0.5 * sin(uTime * spd + aPhase));
@@ -1057,14 +1080,32 @@ const POINT_VERTEX_SHADER = `
   }
 `;
 const POINT_FRAGMENT_SHADER = `
-  uniform sampler2D uMap;
   uniform float uOpacity;
   varying vec3 vColor;
   varying float vFront;
+  varying float vAngle;
+  // signed distance to an equilateral triangle centred at the origin (Inigo
+  // Quilez) — lets us draw a CRISP triangle procedurally at any point size, so
+  // the shape reads instead of blurring into a dot like a feathered sprite did.
+  float sdTri(vec2 p, float r) {
+    const float k = 1.7320508; // sqrt(3)
+    p.x = abs(p.x) - r;
+    p.y = p.y + r / k;
+    if (p.x + k * p.y > 0.0) p = vec2(p.x - k * p.y, -k * p.x - p.y) / 2.0;
+    p.x -= clamp(p.x, -2.0 * r, 0.0);
+    return -length(p) * sign(p.y);
+  }
   void main() {
-    vec4 tex = texture2D(uMap, gl_PointCoord);
-    if (tex.a < 0.02) discard;
-    gl_FragColor = vec4(vColor, uOpacity * tex.a * vFront);
+    // rotate the point-quad coords so each triangle sits at its own angle
+    vec2 c = gl_PointCoord - 0.5;
+    float sa = sin(vAngle), ca = cos(vAngle);
+    vec2 rc = vec2(c.x * ca - c.y * sa, c.x * sa + c.y * ca);
+    float d = sdTri(rc, 0.42);
+    // crisp fill with a thin anti-aliased edge (fixed width — no derivatives,
+    // so it compiles on the GLSL ES 1.00 ShaderMaterial path)
+    float alpha = 1.0 - smoothstep(0.0, 0.06, d);
+    if (alpha < 0.02) discard;
+    gl_FragColor = vec4(vColor, uOpacity * alpha * vFront);
   }
 `;
 function makePointShaderMaterial(dot: THREE.Texture | null, dark: boolean): THREE.ShaderMaterial {
@@ -1321,8 +1362,8 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     };
   }, [shapes, animate, invalidate]);
 
-  // soft round sprite shared by both clouds (clips the default square points)
-  const dot = useMemo(makeDotTexture, []);
+  // soft triangle sprite shared by every cloud (clips the default square points)
+  const dot = useMemo(makeTriangleTexture, []);
   useEffect(() => () => dot?.dispose(), [dot]);
 
   // per-point size multipliers (1 = base). The hover lens writes >1 here for
@@ -1627,7 +1668,10 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
         uniform float uTime;
         uniform float uShimmer;
         varying vec3 vColor;
+        varying float vAngle;
         void main() {
+          // per-particle triangle rotation (same scheme as the model shader)
+          vAngle = aPhase;
           // slow per-particle brightness drift (per-point phase + speed jitter)
           float spd = ${SHIMMER_FREQ.toFixed(3)} * (0.6 + 0.8 * fract(aPhase * 0.31831));
           float s = ${SHIMMER_MIN.toFixed(3)} + ${(1 - SHIMMER_MIN).toFixed(3)} * (0.5 + 0.5 * sin(uTime * spd + aPhase));
@@ -1642,8 +1686,12 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
         uniform sampler2D uMap;
         uniform float uOpacity;
         varying vec3 vColor;
+        varying float vAngle;
         void main() {
-          vec4 tex = texture2D(uMap, gl_PointCoord);
+          vec2 c = gl_PointCoord - 0.5;
+          float sa = sin(vAngle), ca = cos(vAngle);
+          vec2 rc = vec2(c.x * ca - c.y * sa, c.x * sa + c.y * ca) + 0.5;
+          vec4 tex = texture2D(uMap, rc);
           if (tex.a < 0.02) discard;
           gl_FragColor = vec4(vColor, uOpacity * tex.a);
         }
@@ -1910,7 +1958,6 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
       lcx = cursorLocal.x;
       lcy = cursorLocal.y;
     }
-
     for (let p = 0; p < POINT_COUNT; p++) {
       const ix = p * 3;
       const iy = ix + 1;
@@ -1919,8 +1966,11 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
       let mx = lerp(a[ix], b[ix], mf);
       let my = lerp(a[iy], b[iy], mf);
       let mz = lerp(a[iz], b[iz], mf);
-      // hover lens: points near the cursor swell (grow) and part outward (spread)
-      // to make room for the larger dots — strongest at the cursor, 0 at the rim.
+      // hover SIZE lens (the dala.ai feel): points near the cursor simply grow —
+      // biggest at the cursor, smoothly shrinking to base size at the rim. No
+      // positional push, so the cloud never tears open a void; the triangles just
+      // swell toward the pointer (and the bigger they get, the more their shape
+      // reads) and ease back down as the cursor moves away.
       let grow = 0;
       if (lens > 0.001) {
         // 2D (screen-plane) distance — ignore depth so the lens reaches points at
@@ -1930,13 +1980,9 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
         const dy = my - lcy;
         const cd2 = dx * dx + dy * dy;
         if (cd2 < HOVER_R2) {
-          const cd = Math.sqrt(cd2) || 1e-4;
-          const f = 1 - cd / HOVER_RADIUS; // 1 at cursor → 0 at the rim
-          const ff = f * f;
-          grow = HOVER_GROW * ff * lens; // bigger dots under the pointer
-          const spread = (HOVER_SPREAD * ff * lens) / cd; // part them to make room
-          mx += dx * spread;
-          my += dy * spread;
+          const f = 1 - Math.sqrt(cd2) / HOVER_RADIUS; // 1 at cursor → 0 at the rim
+          const ff = f * f * (3 - 2 * f); // smoothstep falloff for a soft gradient
+          grow = HOVER_GROW * ff * lens; // bigger triangles under the pointer
         }
       }
       sizes[p] = 1 + grow;
@@ -1976,13 +2022,9 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
         const dy = my - lcy;
         const cd2 = dx * dx + dy * dy;
         if (cd2 < HOVER_R2) {
-          const cd = Math.sqrt(cd2) || 1e-4;
-          const f = 1 - cd / HOVER_RADIUS;
-          const ff = f * f;
+          const f = 1 - Math.sqrt(cd2) / HOVER_RADIUS;
+          const ff = f * f * (3 - 2 * f);
           grow = HOVER_GROW * ff * lens;
-          const spread = (HOVER_SPREAD * ff * lens) / cd;
-          mx += dx * spread;
-          my += dy * spread;
         }
         oceanSizes[q] = 1 + grow;
         oceanPositions[ix] = mx;
@@ -2031,13 +2073,9 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
           const dy = my - lcy;
           const cd2 = dx * dx + dy * dy;
           if (cd2 < HOVER_R2) {
-            const cd = Math.sqrt(cd2) || 1e-4;
-            const f = 1 - cd / HOVER_RADIUS;
-            const ff = f * f;
+            const f = 1 - Math.sqrt(cd2) / HOVER_RADIUS;
+            const ff = f * f * (3 - 2 * f);
             grow = HOVER_GROW * ff * lens;
-            const spread = (HOVER_SPREAD * ff * lens) / cd;
-            mx += dx * spread;
-            my += dy * spread;
           }
         }
         landFillSizes[q] = 1 + grow;
@@ -2085,13 +2123,9 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
         const dy = my - lcy;
         const cd2 = dx * dx + dy * dy;
         if (cd2 < HOVER_R2) {
-          const cd = Math.sqrt(cd2) || 1e-4;
-          const f = 1 - cd / HOVER_RADIUS;
-          const ff = f * f;
+          const f = 1 - Math.sqrt(cd2) / HOVER_RADIUS;
+          const ff = f * f * (3 - 2 * f);
           grow = HOVER_GROW * ff * lens;
-          const spread = (HOVER_SPREAD * ff * lens) / cd;
-          mx += dx * spread;
-          my += dy * spread;
         }
         brainFillSizes[q] = 1 + grow;
         brainFillPositions[ix] = mx;
