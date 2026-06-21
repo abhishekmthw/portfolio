@@ -89,6 +89,12 @@ const DNAFILL_COUNT = 30000;
 // independent of it so only the docked object grows.
 const MODEL_SCALE = 1.35;
 
+// Global multiplier on the per-point SIZE of the shape-forming particles (morph cloud,
+// brain fill, DNA fill, globe land + ocean). Scales every dot together without moving
+// them — bump to make the particles bigger, lower for finer. The data-viz accents
+// (arcs, nodes, packets) and the background starfield are intentionally left out.
+const PARTICLE_SIZE = 2.0;
+
 // Radius of the world-globe shell (land + ocean dots sit on it). Kept as
 // a named constant because the hover lens also needs it: the globe's lit face
 // sits at z≈+GLOBE_RADIUS, which the cursor projection must account for.
@@ -110,7 +116,7 @@ const HERO_SCALE = 1.5;
 // z-offset globe.
 const HOVER_RADIUS = 0.85; // tight — only the patch right under the cursor reacts
 const HOVER_R2 = HOVER_RADIUS * HOVER_RADIUS;
-const HOVER_GROW = 1.9; // peak size boost at the cursor (×(1+this)); smooth falloff to the rim
+const HOVER_GROW = 3.0; // peak size boost at the cursor (×(1+this)); smooth falloff to the rim
 
 // Slow per-particle shimmer: each point's brightness drifts between SHIMMER_MIN
 // and full on its own phase, so the field gently blinks darker/brighter instead
@@ -173,9 +179,9 @@ const CLOUD_HALF_H = CLOUD_SPAN * 0.22;
 // helix height) == DNA_SPAN. Taller than the other shapes so the slim, true-to-life
 // helix still reads at a comparable presence.
 const DNA_SPAN = 3.0 * MODEL_SCALE;
-// The DNA helix is the ONLY model that auto-spins: it rotates continuously about its
-// vertical (+y) helix axis whenever it's on screen (gated by dnaness in useFrame), at
-// this angular speed (rad/s). Every other shape stays put apart from the cursor tilt.
+// The DNA helix is the ONLY model that auto-spins: it rotates about its vertical (+y)
+// helix axis at this angular speed (rad/s) while DOCKED, and freezes the moment a
+// section transition begins so the scattered particles don't rotate (see useFrame).
 const DNA_SPIN_SPEED = 0.6;
 // one service node (+ icon) per SERVICE_ICONS entry, ringed around the cloud, each
 // fed by a right-angle (elbow) connection trail.
@@ -1030,12 +1036,20 @@ function makeTriangleTexture(): THREE.Texture | null {
 
 // ---------------------------------------------------------------- palette
 
+// Neutral, theme-matching replacement for the old near-white particle highlight: a soft
+// low-saturation lavender-grey that sits with the violet palette instead of glaring
+// white. Used wherever a particle was previously pure/near white (the palette core, the
+// globe arc heads, the cloud packets). NEUTRAL_LIGHT is its deep counterpart for the
+// light theme (a muted slate, like the theme's grey muted-foreground).
+const NEUTRAL_DARK = "#a9a6bd";
+const NEUTRAL_LIGHT = "#4a4756";
+
 function buildColors(n: number, dark: boolean): Float32Array {
   // Shades of violet around the Plum Voltage brand (#8052ff), keyed to the
-  // site: a near-white lavender core (the beam's bright head), then pale →
+  // site: a neutral lavender-grey core (was a near-white highlight), then pale →
   // light → brand → deep-indigo → orchid violets, plus a sparse Lichen-teal
   // glint (the beam's mid-stop, --brand-2). No off-palette amber/magenta.
-  const dpal = ["#f3f1ff", "#c9b8ff", "#a78bff", "#8052ff", "#6d4dff", "#b46cff", "#46c2a6"];
+  const dpal = [NEUTRAL_DARK, "#c9b8ff", "#a78bff", "#8052ff", "#6d4dff", "#b46cff", "#46c2a6"];
   const lpal = ["#2a2540", "#5b46c9", "#7c5cf0", "#6b3df0", "#4f3cc4", "#8e4fe0", "#17977c"];
   const pal = (dark ? dpal : lpal).map((h) => new THREE.Color(h));
   // weight toward the brand violet; teal stays a rare accent (1 in 9)
@@ -1598,14 +1612,14 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
   const headPositions = useMemo(() => new Float32Array(arcHeads.length * 3), [arcHeads]);
   const headColors = useMemo(() => {
     const a = new Float32Array(arcHeads.length * 3);
-    const c = new THREE.Color("#f3f1ff"); // near-white lavender (the bright beam head)
+    const c = new THREE.Color(dark ? NEUTRAL_DARK : NEUTRAL_LIGHT); // neutral beam head
     for (let i = 0; i < arcHeads.length; i++) {
       a[i * 3] = c.r;
       a[i * 3 + 1] = c.g;
       a[i * 3 + 2] = c.b;
     }
     return a;
-  }, [arcHeads]);
+  }, [arcHeads, dark]);
   const headSizes = useMemo(() => {
     const a = new Float32Array(arcHeads.length);
     a.fill(2.4);
@@ -1729,14 +1743,14 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
   const pktPositions = useMemo(() => new Float32Array(cloudPackets.length * 3), [cloudPackets]);
   const pktColors = useMemo(() => {
     const a = new Float32Array(cloudPackets.length * 3);
-    const c = new THREE.Color("#f3f1ff");
+    const c = new THREE.Color(dark ? NEUTRAL_DARK : NEUTRAL_LIGHT);
     for (let i = 0; i < cloudPackets.length; i++) {
       a[i * 3] = c.r;
       a[i * 3 + 1] = c.g;
       a[i * 3 + 2] = c.b;
     }
     return a;
-  }, [cloudPackets]);
+  }, [cloudPackets, dark]);
   const pktSizes = useMemo(() => {
     const a = new Float32Array(cloudPackets.length);
     a.fill(3);
@@ -2166,7 +2180,7 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     // off during the scatter (1 - env) so they don't appear while it's dispersed.
     // uGlobeness drives the front/back fade so the far-hemisphere sea hides too.
     const oc = oceanMaterial.uniforms;
-    oc.uSize.value = (dark ? 0.02 : 0.018) * state.gl.getPixelRatio() * (1 + 0.3 * globeness);
+    oc.uSize.value = (dark ? 0.02 : 0.018) * PARTICLE_SIZE * state.gl.getPixelRatio() * (1 + 0.3 * globeness);
     oc.uScale.value = state.size.height * 0.5;
     oc.uOpacity.value = (dark ? 0.5 : 0.4) * globeness * (1 - env) * entry;
     oc.uTime.value = state.clock.elapsedTime;
@@ -2215,7 +2229,7 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     // it's actually moving (transition/entry/hover); on the settled idle globe it
     // holds its rest layout (reset once) to avoid a needless 48k-point update.
     const lf = landFillMaterial.uniforms;
-    lf.uSize.value = (dark ? 0.032 : 0.03) * state.gl.getPixelRatio() * (1 + 0.3 * globeness);
+    lf.uSize.value = (dark ? 0.032 : 0.03) * PARTICLE_SIZE * state.gl.getPixelRatio() * (1 + 0.3 * globeness);
     lf.uScale.value = state.size.height * 0.5;
     lf.uOpacity.value = (dark ? 0.95 : 0.9) * globeness * entry * (mobile ? 0.6 : 1);
     lf.uTime.value = state.clock.elapsedTime;
@@ -2270,7 +2284,7 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     // layout. It lives inside the inner group, so it docks / tilts / spins with the
     // brain. No front/back fade (uGlobeness 0) — the brain isn't a sphere shell.
     const bf = brainFillMaterial.uniforms;
-    bf.uSize.value = (dark ? 0.034 : 0.03) * state.gl.getPixelRatio();
+    bf.uSize.value = (dark ? 0.034 : 0.03) * PARTICLE_SIZE * state.gl.getPixelRatio();
     bf.uScale.value = state.size.height * 0.5;
     // stays LIT while it bursts apart (no (1 - env)) like the land fill / sparse cloud,
     // so the whole brain scatters as one bright burst; brainness fades it out as the
@@ -2333,7 +2347,7 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     // scatters into the full-screen burst during a section transition (env) so the whole
     // helix disperses with no lingering structure, and reacts to the hover size-lens.
     const cf = dnaFillMaterial.uniforms;
-    cf.uSize.value = (dark ? 0.03 : 0.027) * state.gl.getPixelRatio();
+    cf.uSize.value = (dark ? 0.03 : 0.027) * PARTICLE_SIZE * state.gl.getPixelRatio();
     cf.uScale.value = state.size.height * 0.5;
     // stays LIT while it bursts apart (no (1 - env)); dnaness fades it out as the helix
     // hands off to the next shape.
@@ -2492,7 +2506,7 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     // the two layers read as one fine cloud instead of chunky dots over fine ones.
     const dense = Math.max(globeness, brainness, dnaness);
     const landBase = dark ? lerp(0.055, 0.032, dense) : lerp(0.05, 0.03, dense);
-    mu.uSize.value = landBase * state.gl.getPixelRatio() * (1 + 0.3 * globeness);
+    mu.uSize.value = landBase * PARTICLE_SIZE * state.gl.getPixelRatio() * (1 + 0.3 * globeness);
     mu.uScale.value = state.size.height * 0.5;
     mu.uOpacity.value =
       lerp(dark ? 0.95 : 0.85, dark ? 0.95 : 0.9, globeness) *
@@ -2519,13 +2533,17 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
       const ty = animate ? pointer.current.x * 0.12 : 0;
       inner.current.rotation.x += (tx - inner.current.rotation.x) * k;
       tiltY.current += (ty - tiltY.current) * k;
-      // DNA-only auto-spin: accumulate an angle while the helix is on screen, reset
-      // when it leaves. Applying it × dnaness eases the spin in/out with the morph and
-      // makes it exactly zero off the DNA — so the brain/cloud/brackets/globe rotate
-      // only with the cursor tilt, never inheriting the helix's accumulated angle.
-      if (animate && dnaness > 0.001) dnaSpin.current += delta * DNA_SPIN_SPEED;
-      else dnaSpin.current = 0;
-      inner.current.rotation.y = tiltY.current + rollY + dnaSpin.current * dnaness;
+      // DNA-only auto-spin, applied only while the helix is DOCKED so scattered
+      // particles never rotate. It accumulates when the DNA is on screen AND essentially
+      // un-scattered (env≈0); the instant a transition begins (env rises past the
+      // threshold) the angle FREEZES — the burst disperses without spinning. At the peak
+      // of the burst (env near 1, fully dispersed) the angle is dropped to 0, an
+      // invisible reset at max dispersal, so the cloud re-docks on the neighbouring shape
+      // with no leftover rotation. Applied directly (not ×dnaness): off the DNA dnaSpin
+      // is 0, so no other shape ever inherits a rotation.
+      if (animate && dnaness > 0.5 && env < 0.03) dnaSpin.current += delta * DNA_SPIN_SPEED;
+      else if (env > 0.95 || dnaness < 0.001) dnaSpin.current = 0;
+      inner.current.rotation.y = tiltY.current + rollY + dnaSpin.current;
     }
 
     // starfield motion — replicated verbatim from the deployed (main-branch)
