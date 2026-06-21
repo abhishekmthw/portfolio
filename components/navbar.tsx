@@ -7,7 +7,6 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { ThemeToggle } from "@/components/theme-toggle";
 import { navItems } from "@/data/navigation";
 import { profile } from "@/data/profile";
 
@@ -19,10 +18,26 @@ export function Navbar() {
   const [scrolled, setScrolled] = React.useState(false);
   const [open, setOpen] = React.useState(false);
   const [active, setActive] = React.useState<string>("");
+  // Auto-hide: once scrolled DOWN past the hero, slide the header away; any scroll UP
+  // (at any point) brings it back.
+  const [hidden, setHidden] = React.useState(false);
+  const lastY = React.useRef(0);
 
-  // Blur + brand-glow border once the page has scrolled past the hero edge.
+  // One scroll listener drives both the blur/border (past the hero edge) and the
+  // hide-on-scroll-down / show-on-scroll-up behaviour.
   React.useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 8);
+    const onScroll = () => {
+      const y = window.scrollY;
+      setScrolled(y > 8);
+      // hero is the first section (id="top"); only auto-hide once we're past it
+      const hero = document.getElementById("top");
+      const heroBottom = hero ? hero.offsetHeight : window.innerHeight;
+      const goingDown = y > lastY.current;
+      // hide only when BOTH past the hero AND moving down; otherwise (in the hero, or
+      // scrolling up anywhere) keep it shown
+      setHidden(y > heroBottom - 80 && goingDown);
+      lastY.current = y;
+    };
     onScroll();
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
@@ -95,7 +110,9 @@ export function Navbar() {
         "fixed inset-x-0 top-0 z-50 transition-all duration-300",
         scrolled
           ? "border-b border-border bg-background/70 backdrop-blur-xl"
-          : "border-b border-transparent bg-transparent"
+          : "border-b border-transparent bg-transparent",
+        // slide up when hidden — but never while the mobile menu is open
+        hidden && !open && "-translate-y-full"
       )}
     >
       <div className="container relative flex h-16 items-center justify-between">
@@ -170,7 +187,6 @@ export function Navbar() {
           <Button asChild size="sm" className="hidden md:inline-flex">
             <Link href="#contact">Get in touch</Link>
           </Button>
-          <ThemeToggle />
           <Button
             variant="ghost"
             size="icon"

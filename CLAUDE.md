@@ -27,14 +27,13 @@ To add a new project, append an entry to `data/projects.ts`. Don't touch [compon
 
 ```
 app/
-  layout.tsx          ThemeProvider (dark default), Inter font, metadata sourced from profile.ts
+  layout.tsx          ThemeProvider (forcedTheme="dark" — dark only, no toggle), Inter font, metadata sourced from profile.ts
   page.tsx            Imports each section and renders them in order
   globals.css         Tailwind layers + CSS vars for light/dark + brand color
 components/
   navbar.tsx          Fixed, blurs on scroll, mobile menu
   footer.tsx
-  theme-provider.tsx  next-themes wrapper
-  theme-toggle.tsx    Sun/moon button (uses mounted-flag to avoid hydration mismatch)
+  theme-provider.tsx  next-themes wrapper (locked to dark via forcedTheme in layout.tsx)
   section-heading.tsx Shared eyebrow + title + description block
   ui/                 button.tsx, card.tsx, badge.tsx — shadcn-style primitives
   sections/           hero, about, skills, experience, projects, education, contact

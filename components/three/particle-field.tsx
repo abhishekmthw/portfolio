@@ -45,9 +45,9 @@ const SERVICE_ICONS: LucideIcon[] = [
  * docks to alternating sides per section, and SCATTERS full-screen in the gaps
  * between sections before reassembling on the opposite side as the next shape:
  *
- *   brain → brain → cloud → data-flow → </> → </> → globe
+ *   brain → brain → cloud → DNA → flux → flux → globe
  *
- * Gaps between two IDENTICAL shapes (Hero↔About brain, Projects↔Education </>)
+ * Gaps between two IDENTICAL shapes (Hero↔About brain, Projects↔Education flux)
  * are special: instead of scattering they spin a full 360° about the vertical Y
  * axis — a visible turn that lands cleanly. Mixed-shape gaps scatter as before.
  *
@@ -61,7 +61,7 @@ const SERVICE_ICONS: LucideIcon[] = [
  *
  * Targets @react-three/fiber v8 + React 18. Theme-aware (additive glow on the
  * void; darker normal-blended hues on white). Reduced-motion → a static docked
- * hero </> with stars.
+ * hero brain with stars.
  */
 
 // Shared by every morph shape (one cloud morphs between them, so they all use the
@@ -138,13 +138,13 @@ const ENTRY_MAX_WAIT = 2.2; // fallback: rejoin even if the brain mesh isn't rea
 const ENTRY_DUR = 1.6; // rejoin (assembly) duration
 
 // Per-section shape + side. order.length must match the number of <section>s.
-// Adjacent IDENTICAL shapes (Hero/About brain, Projects/Education </>) spin about
+// Adjacent IDENTICAL shapes (Hero/About brain, Projects/Education flux) spin about
 // the Y axis between sections instead of scattering — see rollY / spinGap below.
-const ORDER = ["brain", "brain", "cloud", "dna", "brackets", "brackets", "globe"] as const;
+const ORDER = ["brain", "brain", "cloud", "dna", "flux", "flux", "globe"] as const;
 
 // Per-section target Y-rotation (radians), interpolated by morph progress in
 // useFrame. A gap between two IDENTICAL shapes turns a VISIBLE amount: the brain
-// pair a HALF turn (180°), the </> pair a FULL turn (360°). The mixed-shape gap
+// pair a HALF turn (180°), the flux pair a FULL turn (360°). The mixed-shape gap
 // right after a half-turn then adds a HIDDEN half turn (masked by the full-screen
 // scatter) so the next glyph faces front again. Building absolute per-section yaws
 // (rather than resetting each gap) keeps rotation.y continuous everywhere — no snap.
@@ -153,7 +153,7 @@ const SECTION_YAW: readonly number[] = (() => {
   for (let g = 0; g < ORDER.length - 1; g++) {
     const spin = ORDER[g] === ORDER[g + 1];
     let d = 0;
-    if (spin) d = ORDER[g] === "brain" ? 1 : 2; // brain: 180°, others: 360°
+    if (spin) d = ORDER[g] === "brain" ? 1 : 2; // brain: 180°, flux/others: 360°
     else if (half[g] % 2 !== 0) d = 1; // realign a back-facing shape to front (under scatter)
     half.push(half[g] + d);
   }
@@ -183,6 +183,31 @@ const DNA_SPAN = 3.0 * MODEL_SCALE;
 // helix axis at this angular speed (rad/s) while DOCKED, and freezes the moment a
 // section transition begins so the scattered particles don't rotate (see useFrame).
 const DNA_SPIN_SPEED = 0.6;
+// "Flux" — the continuously-morphing 3D structure at the Projects/Education stages
+// (it replaced the old </> glyph). A DODECAHEDRON drawn in particles: dense bright
+// clusters at its 20 VERTICES, particles strung along its 30 EDGES. Every frame the
+// vertices are pushed around by a smooth, TRAVELLING displacement field (see DODECA +
+// fillFlux + useFrame), so the solid continuously warps and reshapes — edges flexing
+// and stretching, vertices drifting — without ever settling.
+//   FLUX_R    circumradius of the (unwarped) solid
+//   FLUX_WARP how far each vertex strays, in units of FLUX_R (kept moderate so the
+//             wireframe stays readable rather than tangling)
+//   FLUX_SPEED churn rate of the warp
+//   FLUX_VJIT / FLUX_EJIT  vertex-cluster size / edge thickness, in units of FLUX_R
+const FLUX_R = 1.3 * MODEL_SCALE;
+const FLUX_WARP = 0.28;
+const FLUX_SPEED = 1.0;
+const FLUX_VJIT = 0.05;
+const FLUX_EJIT = 0.016;
+// The Projects/Education stage is now the Vitruvian Man, surface-sampled from
+// /models/vitruvian.glb (the dodecahedron above is only the procedural fallback seed
+// while the mesh loads / if it's absent). FLUX_SPAN is the size the mesh is normalized
+// to — matching the other shapes' spans; ModelConstellation also uses it as its shell
+// radius. dockGate.v is published each frame (1 when a shape is settled/docked, 0 while
+// it scatters or during the load entry) and read by ModelConstellation to fade the
+// surrounding morphing star-network in/out around EVERY model.
+const FLUX_SPAN = 2.6 * MODEL_SCALE;
+const dockGate = { v: 0 };
 // one service node (+ icon) per SERVICE_ICONS entry, ringed around the cloud, each
 // fed by a right-angle (elbow) connection trail.
 const CLOUD_NODE_COUNT = SERVICE_ICONS.length;
@@ -732,11 +757,128 @@ function sampleSilhouette(
 
 // --- 2D drawers (unit canvas of size S, shape centered) ---
 
-function drawBrackets(ctx: CanvasRenderingContext2D, S: number) {
-  ctx.font = `900 ${Math.floor(S * 0.5)}px ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace`;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText("</>", S / 2, S / 2 + S * 0.02);
+// Regular dodecahedron geometry (20 vertices, 30 edges), built once at module load.
+// Vertices use the golden-ratio coordinate set: (±1,±1,±1) and the cyclic (0,±1/φ,±φ).
+// Edges are every vertex PAIR at the minimum pairwise distance (the polyhedron's edge
+// length) — in a 3-regular dodecahedron that's exactly 30. Vertices are normalized to
+// a unit circumradius, so FLUX_R alone sets the on-screen size.
+const DODECA = (() => {
+  const phi = (1 + Math.sqrt(5)) / 2;
+  const inv = 1 / phi;
+  const raw: number[][] = [];
+  for (const x of [-1, 1]) for (const y of [-1, 1]) for (const z of [-1, 1]) raw.push([x, y, z]);
+  for (const a of [-inv, inv])
+    for (const b of [-phi, phi]) {
+      raw.push([0, a, b]); // (0, ±1/φ, ±φ)
+      raw.push([a, b, 0]); // (±1/φ, ±φ, 0)
+      raw.push([b, 0, a]); // (±φ, 0, ±1/φ)
+    }
+  let maxr = 0;
+  for (const v of raw) {
+    const r = Math.hypot(v[0], v[1], v[2]);
+    if (r > maxr) maxr = r;
+  }
+  const n = raw.length;
+  const verts = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    verts[i * 3] = raw[i][0] / maxr;
+    verts[i * 3 + 1] = raw[i][1] / maxr;
+    verts[i * 3 + 2] = raw[i][2] / maxr;
+  }
+  const dist2 = (i: number, j: number) => {
+    const dx = verts[i * 3] - verts[j * 3];
+    const dy = verts[i * 3 + 1] - verts[j * 3 + 1];
+    const dz = verts[i * 3 + 2] - verts[j * 3 + 2];
+    return dx * dx + dy * dy + dz * dz;
+  };
+  let minD = Infinity;
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) minD = Math.min(minD, dist2(i, j));
+  const tol = minD * 1.08; // 8% slack on edge² (next-nearest is ~φ² further — no false edges)
+  const edges: number[] = [];
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) if (dist2(i, j) <= tol) edges.push(i, j);
+  return { verts, edges: Uint16Array.from(edges) };
+})();
+
+// per-frame scratch holding the warped vertex positions (20 × xyz) so every particle
+// on a given vertex/edge reads the same moved corner without recomputing it.
+const fluxWarpBuf = new Float32Array(DODECA.verts.length);
+
+// Fixed per-particle assignment to a vertex or a point along an edge (plus a small
+// fixed jitter), chosen once so points keep their identity and flow smoothly as the
+// solid warps. ~26% cluster on the vertices (bright nodes), the rest line the edges.
+const FLUX_ASSIGN = (() => {
+  const N = POINT_COUNT;
+  const nVerts = DODECA.verts.length / 3;
+  const nEdges = DODECA.edges.length / 2;
+  const isVert = new Uint8Array(N);
+  const aIdx = new Uint16Array(N); // vertex index, or edge endpoint i
+  const bIdx = new Uint16Array(N); // edge endpoint j (edge points only)
+  const tPar = new Float32Array(N); // parameter along the edge (edge points only)
+  const jit = new Float32Array(N * 3); // fixed offset in [-1,1]³, scaled in fillFlux
+  const VERT_FRAC = 0.26;
+  for (let p = 0; p < N; p++) {
+    jit[p * 3] = Math.random() * 2 - 1;
+    jit[p * 3 + 1] = Math.random() * 2 - 1;
+    jit[p * 3 + 2] = Math.random() * 2 - 1;
+    if (Math.random() < VERT_FRAC) {
+      isVert[p] = 1;
+      aIdx[p] = Math.floor(Math.random() * nVerts);
+    } else {
+      const e = Math.floor(Math.random() * nEdges);
+      aIdx[p] = DODECA.edges[e * 2];
+      bIdx[p] = DODECA.edges[e * 2 + 1];
+      tPar[p] = Math.random();
+    }
+  }
+  return { isVert, aIdx, bIdx, tPar, jit };
+})();
+
+/**
+ * Fill `out` with the dodecahedron-wireframe "flux" structure at time `t`. First the
+ * 20 base vertices are displaced by a smooth, TRAVELLING sinusoidal field whose
+ * arguments carry `t` (so the bulge pattern drifts), giving warped corner positions in
+ * `fluxWarpBuf`. Then every particle is placed at its FIXED assignment on that warped
+ * solid — clustered at a vertex, or interpolated along an edge between two warped
+ * vertices — plus its small fixed jitter. Because each point keeps its identity, the
+ * structure flows smoothly: edges flex and stretch and vertices drift as the whole
+ * polyhedron continuously reshapes. Centred on the origin (no centerY needed); called
+ * every frame from useFrame while flux is on screen.
+ */
+function fillFlux(out: Float32Array, t: number): void {
+  const T = t * FLUX_SPEED;
+  const V = DODECA.verts;
+  const nV = V.length / 3;
+  const W = fluxWarpBuf;
+  const s = FLUX_WARP / 1.6; // the field below spans ≈ ±1.6 → scale its push to ±FLUX_WARP
+  for (let k = 0; k < nV; k++) {
+    const vx = V[k * 3], vy = V[k * 3 + 1], vz = V[k * 3 + 2];
+    const dx = Math.sin(2.1 * vx + 0.9 * T) + 0.6 * Math.sin(1.3 * vy - 0.5 * T + 0.7);
+    const dy = Math.sin(2.4 * vy + 0.7 * T + 1.3) + 0.6 * Math.sin(1.1 * vz + 0.4 * T);
+    const dz = Math.sin(2.0 * vz - 0.8 * T + 2.1) + 0.6 * Math.sin(1.5 * vx + 0.6 * T);
+    W[k * 3] = (vx + dx * s) * FLUX_R;
+    W[k * 3 + 1] = (vy + dy * s) * FLUX_R;
+    W[k * 3 + 2] = (vz + dz * s) * FLUX_R;
+  }
+  const A = FLUX_ASSIGN;
+  const N = POINT_COUNT;
+  const vj = FLUX_R * FLUX_VJIT;
+  const ej = FLUX_R * FLUX_EJIT;
+  for (let p = 0; p < N; p++) {
+    const j3 = p * 3;
+    if (A.isVert[p]) {
+      const k = A.aIdx[p] * 3;
+      out[j3] = W[k] + A.jit[j3] * vj;
+      out[j3 + 1] = W[k + 1] + A.jit[j3 + 1] * vj;
+      out[j3 + 2] = W[k + 2] + A.jit[j3 + 2] * vj;
+    } else {
+      const ka = A.aIdx[p] * 3;
+      const kb = A.bIdx[p] * 3;
+      const tt = A.tPar[p];
+      out[j3] = W[ka] + (W[kb] - W[ka]) * tt + A.jit[j3] * ej;
+      out[j3 + 1] = W[ka + 1] + (W[kb + 1] - W[ka + 1]) * tt + A.jit[j3 + 1] * ej;
+      out[j3 + 2] = W[ka + 2] + (W[kb + 2] - W[ka + 2]) * tt + A.jit[j3 + 2] * ej;
+    }
+  }
 }
 
 /** Cloud (procedural FALLBACK) — several overlapping spheres (lobes) forming a puffy
@@ -1170,6 +1312,130 @@ function makePointShaderMaterial(dot: THREE.Texture | null, dark: boolean): THRE
 
 // ---------------------------------------------------------------- scene
 
+/** Soft round additive sprite for the constellation stars (a glowing dot, not a square). */
+function makeRoundSprite(): THREE.Texture {
+  const s = 64;
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = s;
+  const ctx = cv.getContext("2d");
+  if (ctx) {
+    const g = ctx.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    g.addColorStop(0, "rgba(255,255,255,1)");
+    g.addColorStop(0.4, "rgba(255,255,255,0.5)");
+    g.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, s, s);
+  }
+  const t = new THREE.CanvasTexture(cv);
+  t.needsUpdate = true;
+  return t;
+}
+
+/**
+ * ModelConstellation — the morphing star-network that surrounds EVERY docked model
+ * (brain, cloud, DNA, Vitruvian, globe). Bright anchor stars drift on a shell around the
+ * shape, and connecting lines appear/dissolve as anchors cross a distance threshold, so
+ * the asterisms continuously re-form into new shapes. Lives inside the model's `inner`
+ * group, so it docks / tilts / spins with whatever shape is on screen. Its opacity
+ * follows dockGate.v (1 when a shape is settled, 0 during scatter / load entry), so it
+ * fades out with each transition and back in on the next shape. Self-contained: own
+ * buffers + per-frame loop, gated off (skipped) when invisible.
+ */
+function ModelConstellation() {
+  const C = 46; // bright anchor stars
+  const SHELL_MIN = 0.6 * FLUX_SPAN;
+  const SHELL_MAX = 0.85 * FLUX_SPAN;
+  const LINK = 0.42 * FLUX_SPAN; // connect anchors closer than this
+  const BREATHE = 0.045 * FLUX_SPAN;
+  const maxPairs = (C * (C - 1)) / 2;
+
+  const anchors = useMemo(
+    () =>
+      Array.from({ length: C }, () => ({
+        r: SHELL_MIN + Math.random() * (SHELL_MAX - SHELL_MIN),
+        th: Math.random() * Math.PI * 2,
+        ph: Math.acos(Math.random() * 2 - 1),
+        sth: (Math.random() * 2 - 1) * 0.13, // azimuthal drift speed
+        sph: (Math.random() * 2 - 1) * 0.09, // polar drift speed
+      })),
+    [SHELL_MIN, SHELL_MAX]
+  );
+  const anchorPos = useMemo(() => new Float32Array(C * 3), []);
+  const linePos = useMemo(() => new Float32Array(maxPairs * 2 * 3), [maxPairs]);
+  const sprite = useMemo(makeRoundSprite, []);
+  useEffect(() => () => sprite.dispose(), [sprite]);
+  const ptsRef = useRef<THREE.Points>(null);
+  const linesRef = useRef<THREE.LineSegments>(null);
+  const op = useRef(0);
+
+  useFrame((state, delta) => {
+    // ease displayed opacity toward the published gate
+    op.current += (dockGate.v - op.current) * Math.min(1, delta * 6);
+    const o = op.current;
+    if (ptsRef.current) (ptsRef.current.material as THREE.PointsMaterial).opacity = o;
+    if (linesRef.current) (linesRef.current.material as THREE.LineBasicMaterial).opacity = o * 0.55;
+    if (o < 0.003) return; // invisible — skip the drift + line rebuild
+
+    const t = state.clock.elapsedTime;
+    for (let i = 0; i < C; i++) {
+      const A = anchors[i];
+      const th = A.th + A.sth * t;
+      const ph = A.ph + A.sph * t;
+      const r = A.r + Math.sin(t * 0.3 + i) * BREATHE; // gentle radial breathing
+      const sp = Math.sin(ph);
+      anchorPos[i * 3] = r * sp * Math.cos(th);
+      anchorPos[i * 3 + 1] = r * Math.cos(ph);
+      anchorPos[i * 3 + 2] = r * sp * Math.sin(th);
+    }
+    let k = 0;
+    const d2 = LINK * LINK;
+    for (let i = 0; i < C; i++) {
+      for (let j = i + 1; j < C; j++) {
+        const ax = anchorPos[i * 3], ay = anchorPos[i * 3 + 1], az = anchorPos[i * 3 + 2];
+        const bx = anchorPos[j * 3], by = anchorPos[j * 3 + 1], bz = anchorPos[j * 3 + 2];
+        const dx = ax - bx, dy = ay - by, dz = az - bz;
+        const base = k * 6;
+        const within = dx * dx + dy * dy + dz * dz < d2;
+        linePos[base] = ax; linePos[base + 1] = ay; linePos[base + 2] = az;
+        linePos[base + 3] = within ? bx : ax; // out-of-range → zero-length (invisible)
+        linePos[base + 4] = within ? by : ay;
+        linePos[base + 5] = within ? bz : az;
+        k++;
+      }
+    }
+    if (ptsRef.current)
+      (ptsRef.current.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+    if (linesRef.current)
+      (linesRef.current.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+  });
+
+  return (
+    <group>
+      <points ref={ptsRef} frustumCulled={false}>
+        <bufferGeometry>
+          <bufferAttribute attach="attributes-position" args={[anchorPos, 3]} />
+        </bufferGeometry>
+        <pointsMaterial
+          size={0.14}
+          map={sprite}
+          color="#c4b6ff"
+          transparent
+          opacity={0}
+          depthWrite={false}
+          blending={THREE.AdditiveBlending}
+          sizeAttenuation
+        />
+      </points>
+      <lineSegments ref={linesRef} frustumCulled={false}>
+        <bufferGeometry>
+          <bufferAttribute attach="attributes-position" args={[linePos, 3]} />
+        </bufferGeometry>
+        <lineBasicMaterial color="#7b6cff" transparent opacity={0} depthWrite={false} blending={THREE.AdditiveBlending} />
+      </lineSegments>
+    </group>
+  );
+}
+
 function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
   const outer = useRef<THREE.Group>(null);
   const inner = useRef<THREE.Group>(null);
@@ -1216,6 +1482,10 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
   // and for the DNA helix — sampled from /models/dna.glb once it resolves, eased into
   // shapes.dna (procedural makeDNA stands in until then / on failure).
   const dnaTarget = useRef<Float32Array | null>(null);
+  // and for the Vitruvian Man flux shape — sampled from /models/vitruvian.glb once it
+  // resolves, eased into shapes.flux (the procedural dodecahedron seed stands in until
+  // then / on failure).
+  const fluxTarget = useRef<Float32Array | null>(null);
   // force a render after the async brain load lands while in reduced-motion
   // ("demand" frameloop only renders on request)
   const invalidate = useThree((s) => s.invalidate);
@@ -1225,7 +1495,13 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
   const shapes = useMemo(() => {
     const s = {
       // (draw, scale, inflate, wrinkle) — inflate puffs the flat outline into 3D
-      brackets: sampleSilhouette(drawBrackets, POINT_COUNT, 4.0 * MODEL_SCALE, 0.5 * MODEL_SCALE),
+      // flux — the abstract morphing form; seeded at t=0 here, then regenerated every
+      // frame in useFrame so it continuously reshapes (see fillFlux).
+      flux: (() => {
+        const f = new Float32Array(POINT_COUNT * 3);
+        fillFlux(f, 0);
+        return f;
+      })(),
       cloud: makeCloud(POINT_COUNT, CLOUD_SPAN),
       // Experience stage — a DNA double helix; procedural until /models/dna.glb loads
       // and re-samples this buffer (see the GLTF effect + the eased swap in useFrame).
@@ -1243,7 +1519,8 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     // the globe, a sphere already centered at the origin that must stay there so
     // the separate ocean-dot sphere lines up with it.
     (Object.keys(s) as (keyof typeof s)[]).forEach((key) => {
-      if (key !== "globe") centerY(s[key]);
+      // globe + flux are already centred on the origin by construction
+      if (key !== "globe" && key !== "flux") centerY(s[key]);
     });
     return s as Record<(typeof ORDER)[number], Float32Array>;
   }, []);
@@ -1434,6 +1711,35 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
       })
       .catch(() => {
         /* keep the procedural fallback cloud */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [shapes, animate, invalidate]);
+
+  // Load the Vitruvian Man mesh and re-sample shapes.flux off its surface — mirrors the
+  // cloud loader (the procedural dodecahedron seed stands in until this resolves, and
+  // stays if the asset is absent). The GLB already faces front (drawing in the X/Y plane,
+  // thin in Z) via its baked node transform, so NO extra rotation is applied — rotating
+  // a flat relief just tips it edge-on. See public/models/README.md.
+  useEffect(() => {
+    let cancelled = false;
+    new GLTFLoader()
+      .loadAsync("/models/vitruvian.glb")
+      .then((gltf) => {
+        if (cancelled) return;
+        const pts = makeBrainFromMesh(gltf.scene, POINT_COUNT, FLUX_SPAN, false);
+        if (pts.length === 0) return; // no meshes — keep the procedural fallback
+        centerY(pts);
+        if (animate) {
+          fluxTarget.current = pts;
+        } else {
+          shapes.flux.set(pts);
+          invalidate();
+        }
+      })
+      .catch(() => {
+        /* keep the procedural fallback */
       });
     return () => {
       cancelled = true;
@@ -1993,6 +2299,25 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
         dnaTarget.current = null;
       }
     }
+    // same eased swap for the Vitruvian flux shape once /models/vitruvian.glb resolves —
+    // the dodecahedron seed morphs once into the real figure, then holds (the figure is
+    // intentionally still; the surrounding constellation provides the motion).
+    if (fluxTarget.current) {
+      const t = fluxTarget.current;
+      const src = shapes.flux;
+      const e = Math.min(1, delta * 2);
+      let maxd = 0;
+      for (let j = 0; j < src.length; j++) {
+        const d = t[j] - src[j];
+        src[j] += d * e;
+        const ad = d < 0 ? -d : d;
+        if (ad > maxd) maxd = ad;
+      }
+      if (maxd < 0.002) {
+        src.set(t);
+        fluxTarget.current = null;
+      }
+    }
     // same eased swap for the dense brain fill; it isn't recomputed every frame, so
     // push the eased base into the live buffer here while the swap is in flight.
     if (brainFillTarget.current && brainFillRef.current) {
@@ -2054,13 +2379,17 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     const p = i >= last ? 0 : clamp01(segSmooth.current - i);
     const tt = p <= 0.12 ? 0 : p >= 0.88 ? 1 : (p - 0.12) / 0.76;
     const next = Math.min(i + 1, last);
+    // flux (the Vitruvian Man) is a STILL shape now — its buffer is the sampled mesh
+    // (eased in above), not regenerated each frame. The motion at this stage comes from
+    // the surrounding FluxConstellation, not the figure.
     const a = shapes[ORDER[i]];
     const b = shapes[ORDER[next]];
     const mf = easeInOut(tt);
     // A gap between two IDENTICAL adjacent shapes (Hero↔About brain, Projects↔
-    // Education </>) spins about the vertical Y axis instead of scattering: the
-    // morph is a no-op there, so a clean turn reads better than a dissolve.
-    // Mixed-shape gaps scatter as before (env drives the full-screen spread).
+    // Education Vitruvian Man) spins about the vertical Y axis instead of scattering:
+    // the morph is a no-op there, so a clean turn reads better than a dissolve. The
+    // brain turns 180°, the Vitruvian a full 360° (see SECTION_YAW). Mixed-shape gaps
+    // scatter as before (env drives the full-screen spread).
     const spinGap = ORDER[i] === ORDER[next];
     // scatter envelope — a bell over the crossover. Fed the EASED mf (not raw tt)
     // so it leaves/returns to rest with zero velocity: particles ease outward and
@@ -2088,6 +2417,10 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
     // DNA-fill opacity and shrinks the morph cloud's points to match the fill.
     const dnaness =
       (ORDER[i] === "dna" ? 1 - mf : 0) + (ORDER[next] === "dna" ? mf : 0);
+    // the surrounding star-network shows around EVERY settled model: gate purely on
+    // docked-ness — 1 when a shape is held (env 0) and assembled (entry 1), fading to 0
+    // during the scatter and the load entry. Published so ModelConstellation reads it.
+    dockGate.v = (1 - env) * entry;
     // publish the model's transition state so content sections wait for it to
     // settle before revealing (see Reveal). Settled = entry assembly done AND
     // docked at a section's hold band (tt ≈ 0 or 1); otherwise it's mid-morph,
@@ -2619,6 +2952,10 @@ function Constellation({ animate, dark }: { animate: boolean; dark: boolean }) {
               <bufferAttribute attach="attributes-aPhase" args={[dnaFillPhases, 1]} />
             </bufferGeometry>
           </points>
+          {/* morphing star-network around EVERY model (opacity follows dockGate in
+              useFrame — fades out during transitions). Inside `inner`, so it docks /
+              tilts / spins with whatever shape is on screen. */}
+          <ModelConstellation />
           {/* sea dots filling the ocean of the world globe (opacity + front/back
               fade + hover swell driven per-frame via the shared shader — invisible
               on every other shape, and the far-hemisphere sea hides like the land) */}

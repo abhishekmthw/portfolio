@@ -49,3 +49,30 @@ geometry matters.
 
 To replace it, drop in any `.glb` with a DNA double-helix mesh (geometry only, Y-up) as
 `dna.glb` — no code change needed.
+
+## vitruvian.glb (optional — Flux Lab only)
+
+Used **only** by the throwaway structure-preview route at `/flux-lab`
+([components/flux-lab/](../../components/flux-lab/)), not by the live site. Like the
+others, the mesh is **never rendered** — its surface is sampled into a point cloud
+(`MeshSurfaceSampler`), so only the geometry matters.
+
+If the file is absent, the "Vitruvian Man" option falls back to a procedural figure (a
+humanoid inscribed in a circle + square whose limbs sweep between da Vinci's two poses).
+Drop a `.glb` here as `vitruvian.glb` and it renders from the real mesh automatically —
+no code change.
+
+### Provenance & license — ⚠️ attribution REQUIRED
+
+- **"The Vitruvian Man"** by **Fri (@manhiac)** on Sketchfab:
+  https://sketchfab.com/3d-models/the-vitruvian-man-6c0b99ce8463468fbd00f304dbe7e105
+- **License: CC-BY 4.0** — attribution is **required**. Keep this credit, and surface it
+  (author + source + license) anywhere this lab is publicly deployed.
+- ~13 MB, ~327k triangles. It already **faces front** (drawing in the X/Y plane, thin in
+  Z) via its baked node transform, so the samplers apply **no rotation** — rotating a flat
+  relief just tips it edge-on. The geometry is auto-centred + scaled to match the other
+  models. If you swap in a file that loads edge-on or upside-down, add the needed rotation
+  in `makeBrainFromMesh`'s caller ([particle-field.tsx](../../components/three/particle-field.tsx))
+  and `sampleGLB` ([flux-lab-scene.tsx](../../components/flux-lab/flux-lab-scene.tsx)).
+- Optional: shrink it with `@gltf-transform/cli simplify/prune/dedup` (see brain.glb
+  above) — only geometry positions are sampled, so heavy decimation is fine.
