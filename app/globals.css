@@ -131,6 +131,16 @@
 }
 
 @layer utilities {
+  /* Scrollable region with no visible scrollbar — matches the document, whose
+     native scrollbar is hidden in favour of the custom overlay one. */
+  .no-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
   .bg-grid {
     background-image:
       linear-gradient(to right, hsl(var(--border) / 0.4) 1px, transparent 1px),

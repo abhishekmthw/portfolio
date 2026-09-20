@@ -17,7 +17,7 @@ There is exactly one route: [app/page.tsx](app/page.tsx). It composes a stack of
 | [data/profile.ts](data/profile.ts) | Name, title, location, email, phone, GitHub/LinkedIn, hero summary, About paragraphs, spoken languages |
 | [data/skills.ts](data/skills.ts) | Skill groups (`category` + `items[]`) — order in the array == order on the page |
 | [data/experience.ts](data/experience.ts) | Work history. `current: true` paints the "Current" badge; `remote: true` appends "· Remote" to the location |
-| [data/projects.ts](data/projects.ts) | Project cards. `status` is `"in-development" \| "live" \| "archived"`. Optional `links.{repo,live,case_study}` surface buttons. `accent` is a Tailwind gradient classlist for the card glow |
+| [data/projects.ts](data/projects.ts) | Project cards **and** the detail modal each card opens. Card-only fields: `tagline`, `summary`, `cardHighlights`, `metrics`, `cardStack`. Modal-only fields: `overview` (paragraphs), `sections` (headed bullet lists), the full `stack`. `status` is `"in-development" \| "live" \| "archived"`. Optional `links.{repo,live,case_study}` surface buttons on both the card and the modal (`liveLabel` renames the live one). `preview` names an interactive UI demo registered in the `previews` map in [components/sections/projects.tsx](components/sections/projects.tsx). `accent` is a Tailwind gradient classlist for the card glow |
 | [data/education.ts](data/education.ts) | Two arrays: `education[]` (degrees) and `accomplishments[]` (certifications) |
 | [data/navigation.ts](data/navigation.ts) | Anchor links in the navbar |
 
@@ -35,8 +35,11 @@ components/
   footer.tsx
   theme-provider.tsx  next-themes wrapper (locked to dark via forcedTheme in layout.tsx)
   section-heading.tsx Shared eyebrow + title + description block
-  ui/                 button.tsx, card.tsx, badge.tsx — shadcn-style primitives
+  ui/                 button.tsx, card.tsx, badge.tsx, dialog.tsx — shadcn-style primitives
   sections/           hero, about, skills, experience, projects, education, contact
+  projects/           interactive per-project UI demos shown inside the project modal
+                      (crypsavvy-preview.tsx — a self-contained, simulated replica of
+                      the CrypSavvy dashboard; no network, no shared state)
 data/                 (described above)
 lib/utils.ts          cn() helper (clsx + tailwind-merge)
 ```
